@@ -1,5 +1,9 @@
 # AetherOps - Real-Time Codebase Analyzer
 
+**Live Demo:** [https://aetherops-flame.vercel.app](https://aetherops-flame.vercel.app)
+
+AetherOps is an enterprise-grade, production-ready Real-Time Codebase Analyzer with an autonomous AI code-review and auto-remediation pipeline. Built to bridge the gap between AI coding assistants and real-world SRE workflows, it features direct Browser File System integration for atomic, production-ready code fixes.
+
 Enterprise-grade, production-ready Real-Time Codebase Analyzer with autonomous AI code-review and auto-remediation pipeline. Portfolio-grade project for live recruiter demo.
 
 ![Stack](https://img.shields.io/badge/Next.js-16-black) ![TS](https://img.shields.io/badge/TypeScript-strict-blue) ![Drizzle](https://img.shields.io/badge/Drizzle%20ORM-pg-green) ![Gemini](https://img.shields.io/badge/AI-Gemini%20API-orange)
@@ -31,6 +35,11 @@ Enterprise-grade, production-ready Real-Time Codebase Analyzer with autonomous A
 
 9. **Any language** - `detectLanguageFromExtension` never crashes, fallback to plaintext highlighting + generic heuristic analysis.
 
+10. ### 🚀 Key Achievements
+* **Autonomous Remediation:** Implemented an AI-driven pipeline that detects critical vulnerabilities and suggests remediations, significantly reducing manual code review overhead.
+* **Production-Grade Performance:** Optimized for large-scale analysis using chunked serverless streaming and SWR-based granular UI updates to maintain a responsive 60FPS user experience.
+* **Atomic File Handling:** Utilized the Browser File System Access API to perform direct, atomic writes, ensuring code fixes are applied safely and reliably without user-prompt friction.
+
 ## Tech Stack (locked)
 
 - Next.js 16 App Router Turbopack
@@ -40,6 +49,10 @@ Enterprise-grade, production-ready Real-Time Codebase Analyzer with autonomous A
 - Google Gemini API - model/key from `.env` (`GEMINI_API_KEY`, `GEMINI_MODEL`) - never hardcoded
 - Browser File System Access API (showDirectoryPicker, FileSystemFileHandle, FileSystemWritableFileStream) - client-side handle lives in browser, works even when app hosted on Vercel
 - Vercel serverless-safe
+
+- ### ⚠️ Technical Prerequisites
+* **Browser:** Chrome or Edge (Required for File System Access API support).
+* **Environment:** Node.js 20+ installed locally for development.
 
 ## Architecture
 
