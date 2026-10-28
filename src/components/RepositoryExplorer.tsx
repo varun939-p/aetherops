@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import type { FileSummaryDto } from "@/lib/contracts";
 import { useVirtualRows } from "@/lib/use-virtual";
 import { basename, cn, fuzzyMatch } from "@/lib/utils";
-import { FileStatusMark, HighlightedText, Icon, PaneHeader, Segmented, SkeletonRows, EmptyState } from "./ui";
+import { EmptyState, FileStatusMark, HighlightedText, Icon, PaneHeader, Segmented, SkeletonRows } from "./ui";
 
 interface DirNode {
   name: string;
@@ -19,7 +19,7 @@ type Row =
   | { kind: "dir"; node: DirNode; depth: number }
   | { kind: "file"; file: FileSummaryDto; depth: number; positions?: number[] };
 
-const ROW_H = 24;
+const ROW_H = 30;
 
 function buildTree(files: FileSummaryDto[]): DirNode {
   const root: DirNode = { name: "", path: "", dirs: new Map(), files: [], open: 0, critical: 0 };
@@ -61,7 +61,13 @@ function flatten(node: DirNode, expanded: Set<string>, depth: number, out: Row[]
   return out;
 }
 
-type Quick = "all" | "faults" | "modified";
+type Quick = "all" | "issues" | "changed";
+
+function countTone(f: FileSummaryDto): string {
+  if (f.criticalIssues > 0) return "bg-sev-critical-soft text-sev-critical";
+  if (f.highIssues > 0) return "bg-sev-high-soft text-sev-high";
+  return "bg-hover text-fg-muted";
+}
 
 export function RepositoryExplorer({
   files,
@@ -85,8 +91,8 @@ export function RepositoryExplorer({
 
   const visibleFiles = useMemo(() => {
     const list = files ?? [];
-    if (quick === "faults") return list.filter((f) => f.openIssues > 0 || f.status === "error");
-    if (quick === "modified") return list.filter((f) => f.stale || f.status === "pending" || f.status === "analyzing");
+    if (quick === "issues") return list.filter((f) => f.openIssues > 0 || f.status === "error");
+    if (quick === "changed") return list.filter((f) => f.stale || f.status === "pending" || f.status === "analyzing");
     return list;
   }, [files, quick]);
 
@@ -101,12 +107,12 @@ export function RepositoryExplorer({
         .slice(0, 500)
         .map(({ file, m }) => ({ kind: "file" as const, file, depth: 0, positions: m.positions }));
     }
-    // Every directory is expanded unless the user collapsed it.
     const expanded = new Set<string>();
-    const walk = (n: DirNode) => n.dirs.forEach((d) => {
-      if (!collapsedDirs.has(d.path)) expanded.add(d.path);
-      walk(d);
-    });
+    const walk = (n: DirNode) =>
+      n.dirs.forEach((d) => {
+        if (!collapsedDirs.has(d.path)) expanded.add(d.path);
+        walk(d);
+      });
     walk(tree);
     return flatten(tree, expanded, 0, []);
   }, [query, visibleFiles, tree, collapsedDirs]);
@@ -120,18 +126,16 @@ export function RepositoryExplorer({
       return next;
     });
 
-  const faults = (files ?? []).filter((f) => f.criticalIssues > 0).length;
+  const withIssues = (files ?? []).filter((f) => f.openIssues > 0).length;
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Repository explorer">
-      <PaneHeader title="Explorer">
-        <span className="tnum font-mono text-[10.5px] font-normal normal-case tracking-normal text-fg-subtle">
-          {files ? `${files.length} files${faults ? ` · ${faults} critical` : ""}` : ""}
-        </span>
+    <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Files">
+      <PaneHeader title="Files" hint="Every file AetherOps indexed in this project. Click a file to see its code and issues; hover a file for quick actions.">
+        <span className="tnum text-[12px] font-normal text-fg-subtle">{files ? `${files.length} · ${withIssues} with issues` : ""}</span>
       </PaneHeader>
-      <div className="flex shrink-0 flex-col gap-2 border-b border-line p-2">
-        <label className="flex h-7 items-center gap-2 rounded-[3px] border border-line-strong bg-canvas px-2 focus-within:border-accent">
-          <Icon name="search" size={12} className="text-fg-subtle" />
+      <div className="flex shrink-0 flex-col gap-2 border-b border-line p-2.5">
+        <label className="flex h-8 items-center gap-2 rounded-md border border-line-strong bg-canvas px-2.5 focus-within:border-accent">
+          <Icon name="search" size={14} className="text-fg-subtle" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -139,30 +143,29 @@ export function RepositoryExplorer({
               if (e.key === "Enter" && rows[0]?.kind === "file") onSelect(rows[0].file.id);
               if (e.key === "Escape") setQuery("");
             }}
-            placeholder="Filter files (fuzzy)"
+            placeholder="Search files"
             spellCheck={false}
-            className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-fg outline-none placeholder:text-fg-faint"
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-fg outline-none placeholder:text-fg-faint"
           />
         </label>
         <Segmented<Quick>
           size="xs"
+          label="Filter files"
           value={quick}
           onChange={setQuick}
           options={[
             { value: "all", label: "All" },
-            { value: "faults", label: "Faults" },
-            { value: "modified", label: "Modified" },
+            { value: "issues", label: "With issues" },
+            { value: "changed", label: "Changed", title: "Edited since the last analysis" },
           ]}
         />
       </div>
 
-      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto py-1">
         {loading && !files ? (
           <SkeletonRows rows={14} />
         ) : rows.length === 0 ? (
-          <EmptyState title={files?.length ? "No matching files" : "No files"}>
-            {files?.length ? "Adjust the filter." : "Link a workspace to ingest a repository."}
-          </EmptyState>
+          <EmptyState title={files?.length ? "No matching files" : "No files yet"}>{files?.length ? "Try another search or filter." : "Open a folder to index a project."}</EmptyState>
         ) : (
           <div style={{ height: v.totalHeight }} className="relative">
             <div style={{ transform: `translateY(${v.offset}px)` }} className="absolute inset-x-0 top-0">
@@ -172,12 +175,13 @@ export function RepositoryExplorer({
                     key={`d:${row.node.path}`}
                     type="button"
                     onClick={() => toggle(row.node.path)}
-                    className="flex h-6 w-full items-center gap-1 pr-2 text-left text-[12px] text-fg-muted hover:bg-hover"
-                    style={{ paddingLeft: 8 + row.depth * 12 }}
+                    className="flex h-[30px] w-full items-center gap-1.5 pr-3 text-left text-[13px] text-fg-muted hover:bg-hover"
+                    style={{ paddingLeft: 10 + row.depth * 14 }}
                   >
-                    <Icon name={collapsedDirs.has(row.node.path) ? "chevronRight" : "chevronDown"} size={12} className="text-fg-subtle" />
-                    <span className="truncate font-mono text-[11.5px]">{row.node.name}</span>
-                    {row.node.critical > 0 && <span className="tnum ml-auto font-mono text-[10.5px] text-sev-critical">{row.node.critical}</span>}
+                    <Icon name={collapsedDirs.has(row.node.path) ? "chevronRight" : "chevronDown"} size={13} className="text-fg-subtle" />
+                    <Icon name="folder" size={14} className="text-fg-faint" />
+                    <span className="truncate font-medium">{row.node.name}</span>
+                    {row.node.critical > 0 && <span className="tnum ml-auto text-[12px] font-semibold text-sev-critical">{row.node.critical}</span>}
                   </button>
                 ) : (
                   <div
@@ -189,26 +193,28 @@ export function RepositoryExplorer({
                     onKeyDown={(e) => e.key === "Enter" && onSelect(row.file.id)}
                     title={row.file.path}
                     className={cn(
-                      "group flex h-6 cursor-pointer items-center gap-2 pr-1.5 text-[12px]",
-                      row.file.id === selectedId ? "bg-accent/12 text-fg shadow-[inset_2px_0_0_var(--color-accent)]" : "text-fg-muted hover:bg-hover hover:text-fg"
+                      "group mx-1.5 flex h-[30px] cursor-pointer items-center gap-2 rounded-md pr-1.5 text-[13px]",
+                      row.file.id === selectedId ? "bg-accent-soft font-medium text-fg" : "text-fg-muted hover:bg-hover hover:text-fg"
                     )}
-                    style={{ paddingLeft: 8 + row.depth * 12 + 13 }}
+                    style={{ paddingLeft: 4 + row.depth * 14 + 19 }}
                   >
-                    <span className="flex w-2.5 justify-center">
+                    <span className="flex w-3 justify-center">
                       <FileStatusMark status={row.file.status} critical={row.file.criticalIssues} stale={row.file.stale} />
                     </span>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
+                    <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">
                       {row.positions ? <HighlightedText text={row.file.path} positions={row.positions} /> : basename(row.file.path)}
                     </span>
                     {row.file.openIssues > 0 && (
-                      <span className={cn("tnum font-mono text-[10.5px] group-hover:hidden", row.file.criticalIssues ? "text-sev-critical" : "text-fg-subtle")}>{row.file.openIssues}</span>
+                      <span className={cn("tnum rounded px-1.5 text-[11.5px] font-semibold group-hover:hidden", countTone(row.file))} title={`${row.file.openIssues} open issues`}>
+                        {row.file.openIssues}
+                      </span>
                     )}
                     <span className="hidden items-center group-hover:flex">
-                      <button type="button" title="Analyze" onClick={(e) => (e.stopPropagation(), onAnalyze(row.file.id))} className="rounded-[2px] p-0.5 text-fg-subtle hover:bg-raised hover:text-fg">
-                        <Icon name="play" size={12} />
+                      <button type="button" title="Analyze this file" onClick={(e) => (e.stopPropagation(), onAnalyze(row.file.id))} className="rounded p-1 text-fg-subtle hover:bg-raised hover:text-fg">
+                        <Icon name="play" size={13} />
                       </button>
-                      <button type="button" title="Delete from disk and index" onClick={(e) => (e.stopPropagation(), onDelete(row.file))} className="rounded-[2px] p-0.5 text-fg-subtle hover:bg-raised hover:text-sev-critical">
-                        <Icon name="trash" size={12} />
+                      <button type="button" title="Delete file" onClick={(e) => (e.stopPropagation(), onDelete(row.file))} className="rounded p-1 text-fg-subtle hover:bg-raised hover:text-sev-critical">
+                        <Icon name="trash" size={13} />
                       </button>
                     </span>
                   </div>
@@ -217,6 +223,13 @@ export function RepositoryExplorer({
             </div>
           </div>
         )}
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-line px-3 py-2 text-[11.5px] text-fg-subtle" aria-label="Legend">
+        <span className="flex items-center gap-1.5"><span className="size-2 rotate-45 bg-sev-critical" />Critical</span>
+        <span className="flex items-center gap-1.5"><span className="size-2 rounded-[1px] bg-sev-medium" />Issues</span>
+        <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-ok" />Clean</span>
+        <span className="flex items-center gap-1.5"><span className="size-2 rounded-full border-[1.5px] border-sev-medium" />Changed</span>
       </div>
     </section>
   );

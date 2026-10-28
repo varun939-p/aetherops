@@ -1,0 +1,1 @@
+ALTER TYPE "public"."workspace_kind" ADD VALUE 'demo';

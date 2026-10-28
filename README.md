@@ -60,6 +60,10 @@ Add `GEMINI_API_KEY` and `GEMINI_MODEL` to enable deep analysis and patches.
 
 ## Using it
 
+On first open, AetherOps loads a built-in **Sample project**: three small services with real defects
+(SQL injection, N+1 queries, missing timeouts, shell injection, typos). Fixes applied to it change only the
+database; **Reset sample** restores the originals. Set `AETHEROPS_DEMO=off` to disable it.
+
 1. **Link workspace** → paste an absolute path inside `AETHEROPS_ALLOWED_ROOTS` (server mode), or **Choose folder…** (browser mode).
 2. The initial sync runs the deterministic engine on every file. **Sync** re-reads disk and only processes changed hashes.
 3. Select a file: if AI is configured and the current content is not AI-verified yet, deep analysis runs automatically.
@@ -86,6 +90,7 @@ All responses: `{ "ok": boolean, "data": T | null, "meta": { "requestId", "durat
 | `GET /api/workspaces` | — | Workspaces with file counts |
 | `POST /api/workspaces` | `{ kind: "server", rootPath }` or `{ kind: "browser", name }` | Created/existing workspace (201) |
 | `DELETE /api/workspaces/{id}` | — | Unlinks (DB only; disk untouched) |
+| `POST /api/workspaces/{id}/reset` | — | Restores the sample project to its original files |
 | `POST /api/workspaces/{id}/sync` | server: `{}` · browser: `{ entries: [{ path, hash }] }` | Delta sync counts · paths whose content is needed |
 | `GET /api/files?workspaceId=` | — | File summaries (no content) with open/critical/high counts |
 | `POST /api/files` | `{ workspaceId, files: [{ path, content, hash }] }` | Browser-mode upload; hashes re-verified server-side |

@@ -83,7 +83,12 @@ export default function CommandCenter() {
   const { data: system, mutate: mutateSystem } = useSWR<SystemDto>("/api/system", swrFetcher, { refreshInterval: 15_000 });
   const ready = system?.db.migrated === true;
   const { data: workspaces, mutate: mutateWorkspaces } = useSWR<WorkspaceDto[]>(ready ? "/api/workspaces" : null, swrFetcher);
-  const active = useMemo(() => workspaces?.find((w) => w.id === chosenWs) ?? workspaces?.[0], [workspaces, chosenWs]);
+  // First visit lands on the built-in sample project so there is something to explore immediately.
+  const active = useMemo(
+    () => workspaces?.find((w) => w.id === chosenWs) ?? workspaces?.find((w) => w.kind === "demo") ?? workspaces?.[0],
+    [workspaces, chosenWs]
+  );
+  const isDemo = active?.kind === "demo";
   const wsId = active?.id ?? null;
   const busy = activity !== null;
 
@@ -194,6 +199,23 @@ export default function CommandCenter() {
     }
   };
 
+  const resetDemo = async () => {
+    if (!active || !window.confirm("Restore the sample files to their original state? Applied fixes and analysis history for the sample are discarded.")) return;
+    setActivity({ label: "Resetting sample", done: 0, total: null });
+    try {
+      await api(`/api/workspaces/${active.id}/reset`, { method: "POST", json: {} });
+      autoAnalyzed.current.clear();
+      setSelectedId(null);
+      setFocus(null);
+      setNotice({ tone: "info", text: "Sample project restored to its original files." });
+    } catch (err) {
+      setNotice(describeError(err));
+    } finally {
+      setActivity(null);
+      await refreshAll();
+    }
+  };
+
   const unlink = async () => {
     if (!active || !window.confirm(`Unlink "${active.name}"? Stored analysis is removed; files on disk are not touched.`)) return;
     try {
@@ -273,9 +295,10 @@ export default function CommandCenter() {
       }
       const res = await api<CommitResultDto>("/api/commit", { method: "POST", json: { fileId: detail.id, baseHash: detail.contentHash, writtenHash, git }, timeoutMs: 90_000 });
       await mutateDetail(res.file, { revalidate: false });
+      const gitNote = active.kind !== "server" ? "" : res.gitSha ? ` Committed to git as ${res.gitSha.slice(0, 8)}.` : res.gitError && git ? ` Git commit failed: ${res.gitError}` : "";
       setNotice({
-        tone: res.gitError ? "error" : "info",
-        text: `Patch written to ${detail.path} (sha256 ${res.newHash.slice(0, 10)}) · ${res.issuesFixed} issue(s) marked fixed${res.gitSha ? ` · git ${res.gitSha.slice(0, 8)}` : ""}${res.gitError ? ` · git commit failed: ${res.gitError}` : ""}`,
+        tone: res.gitError && git && active.kind === "server" ? "error" : "info",
+        text: `Fix applied to ${detail.path}: ${res.issuesFixed} issue${res.issuesFixed === 1 ? "" : "s"} resolved.${gitNote}`,
       });
     } catch (err) {
       setNotice(describeError(err));
@@ -327,7 +350,7 @@ export default function CommandCenter() {
   const progressPct = activity?.total ? Math.min(100, (activity.done / Math.max(1, activity.total)) * 100) : null;
 
   return (
-    <div className="grid h-dvh grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_auto_minmax(0,1fr)_24px] overflow-hidden bg-canvas">
+    <div className="grid h-dvh grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_auto_minmax(0,1fr)_32px] overflow-hidden bg-canvas">
       <WorkspaceBar
         system={system}
         workspaces={workspaces}
@@ -338,6 +361,7 @@ export default function CommandCenter() {
         onLinkServer={linkServer}
         onLinkBrowser={linkBrowser}
         onSync={() => active && syncWorkspace(active)}
+        onResetDemo={resetDemo}
         onScan={runScan}
         onUnlink={unlink}
         onTogglePane={(p) => setOverlay((o) => (o === p ? null : p))}
@@ -355,13 +379,13 @@ export default function CommandCenter() {
           <div
             role={setupMessage || notice?.tone === "error" ? "alert" : "status"}
             className={cn(
-              "flex items-start gap-2 border-b border-line px-3 py-1.5 text-[12px]",
-              setupMessage || notice?.tone === "error" ? "bg-sev-critical/[0.07] text-[#f4a3a6]" : "bg-accent/[0.06] text-fg-muted"
+              "flex items-start gap-2 border-b border-line px-4 py-2 text-[13px]",
+              setupMessage || notice?.tone === "error" ? "bg-danger-bg text-danger-fg" : "bg-info-bg text-fg-muted"
             )}
           >
-            <Icon name={setupMessage || notice?.tone === "error" ? "alert" : "database"} size={13} className="mt-0.5" />
+            <Icon name={setupMessage || notice?.tone === "error" ? "alert" : "check"} size={14} className="mt-0.5" />
             <span className="min-w-0 flex-1">
-              {(notice?.code || setupMessage) && <span className="mr-2 font-mono text-[10.5px] opacity-80">{setupMessage ? "SETUP" : notice?.code}</span>}
+              {setupMessage && <span className="mr-2 font-semibold">Setup needed:</span>}
               {setupMessage ?? notice?.text}
             </span>
             {!setupMessage && (
@@ -378,11 +402,11 @@ export default function CommandCenter() {
         )}
       </div>
 
-      <main className="relative grid min-h-0 grid-cols-1 divide-x divide-line md:grid-cols-[248px_minmax(0,1fr)] xl:grid-cols-[272px_minmax(0,1fr)_384px]">
+      <main className="relative grid min-h-0 grid-cols-1 divide-x divide-line md:grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[288px_minmax(0,1fr)_400px]">
         <div
           className={cn(
             "min-h-0 md:static md:flex md:flex-col",
-            overlay === "explorer" ? "absolute inset-y-0 left-0 z-30 flex w-[min(320px,85vw)] flex-col border-r border-line shadow-2xl" : "hidden"
+            overlay === "explorer" ? "absolute inset-y-0 left-0 z-30 flex w-[min(320px,85vw)] flex-col border-r border-line shadow-[var(--shadow-pop)]" : "hidden"
           )}
         >
           <RepositoryExplorer files={files} loading={filesLoading} selectedId={selectedId} onSelect={selectFile} onAnalyze={analyze} onDelete={deleteFile} />
@@ -394,6 +418,8 @@ export default function CommandCenter() {
           focus={focus}
           aiConfigured={aiConfigured}
           canGitCommit={active?.kind === "server" && active.isGitRepo}
+          isDemo={isDemo}
+          onOpenFirst={isDemo && files?.length ? () => selectFile([...files].sort((a, b) => b.criticalIssues - a.criticalIssues || a.path.localeCompare(b.path))[0].id) : null}
           analyzing={analyzingId !== null && analyzingId === selectedId}
           committing={committing}
           onAnalyze={() => selectedId && analyze(selectedId)}
@@ -403,7 +429,7 @@ export default function CommandCenter() {
         <div
           className={cn(
             "min-h-0 xl:static xl:flex xl:flex-col",
-            overlay === "issues" ? "absolute inset-y-0 right-0 z-30 flex w-[min(400px,92vw)] flex-col border-l border-line shadow-2xl" : "hidden"
+            overlay === "issues" ? "absolute inset-y-0 right-0 z-30 flex w-[min(420px,92vw)] flex-col border-l border-line shadow-[var(--shadow-pop)]" : "hidden"
           )}
         >
           <IssueTracker
@@ -420,24 +446,22 @@ export default function CommandCenter() {
         </div>
       </main>
 
-      <footer className="flex items-center gap-4 border-t border-line bg-surface px-3 font-mono text-[10.5px] text-fg-subtle">
+      <footer className="flex items-center gap-4 border-t border-line bg-canvas px-4 text-[12px] text-fg-subtle">
         {activity ? (
           <span className="flex min-w-0 items-center gap-2 text-fg-muted">
-            <Spinner className="size-2.5" />
-            <span className="shrink-0">
-              {activity.label} {activity.total !== null ? `${formatInt(activity.done)}/${formatInt(activity.total)}` : formatInt(activity.done) || ""}
+            <Spinner className="size-3" />
+            <span className="shrink-0 font-medium">
+              {activity.label}
+              {activity.total !== null ? ` ${formatInt(activity.done)} of ${formatInt(activity.total)}` : activity.done ? ` ${formatInt(activity.done)}` : "…"}
             </span>
-            {activity.detail && <span className="truncate text-fg-subtle">{activity.detail}</span>}
+            {activity.detail && <span className="truncate font-mono text-[11.5px] text-fg-subtle">{activity.detail}</span>}
           </span>
         ) : (
-          <span>{active ? `${active.kind} workspace · ${formatInt(files?.length ?? 0)} files indexed` : "no workspace linked"}</span>
+          <span>{active ? `${formatInt(files?.length ?? 0)} files indexed` : "No project open"}</span>
         )}
-        <span className="ml-auto hidden shrink-0 sm:inline">
-          {stats ? `${formatInt(stats.openIssues.total)} open · ${formatInt(stats.fixedIssues)} fixed` : ""}
-        </span>
-        {detail && (
-          <span className="hidden shrink-0 md:inline">
-            {detail.language} · {detail.eol.toUpperCase()} · UTF-8
+        {stats && (
+          <span className="tnum ml-auto hidden shrink-0 sm:inline">
+            {formatInt(stats.openIssues.total)} open · {formatInt(stats.fixedIssues)} fixed
           </span>
         )}
       </footer>

@@ -167,3 +167,34 @@ test("browser manifest prunes vanished files and requests only changed content",
   const res = await applyManifest(db, ws, [a]);
   assert.deepEqual(res, { needed: [], removed: 1, unchanged: 1 });
 });
+
+test("sample project: seeded once, patch applies in the database only, reset restores originals", async () => {
+  const { ensureDemoWorkspace, resetDemoWorkspace } = await import("@/server/demo");
+  const { SAMPLE_FILES } = await import("@/demo/samples");
+  globalThis.__aetherDemoReady = undefined;
+  await ensureDemoWorkspace(db);
+  globalThis.__aetherDemoReady = undefined;
+  await ensureDemoWorkspace(db); // idempotent
+  const demos = await db.select().from(schema.workspaces).where(eq(schema.workspaces.kind, "demo"));
+  assert.equal(demos.length, 1);
+  const ws = demos[0];
+
+  const summaries = await listFileSummaries(db, ws.id);
+  assert.deepEqual(summaries.map((f) => f.path).sort(), SAMPLE_FILES.map((f) => f.path).sort());
+  assert.ok(summaries.every((f) => f.openIssues > 0), "every sample file has findings");
+
+  const target = summaries.find((f) => f.path.endsWith(".py"))!;
+  const detail = await getFileDetail(db, target.id);
+  const patched = detail.content.replace("batch_sise", "batch_size");
+  await db.update(schema.files).set({ correctedContent: patched, correctedForHash: detail.contentHash }).where(eq(schema.files.id, target.id));
+  const result = await commitPatch(db, { fileId: target.id, baseHash: detail.contentHash, git: true });
+  assert.equal(result.gitSha, null);
+  assert.match(result.gitError ?? "", /server-mode/);
+  assert.ok(!result.file.issues.some((i) => i.status === "open" && i.ruleId === "PY-NAME-001"));
+
+  await resetDemoWorkspace(db, ws);
+  const restored = await listFileSummaries(db, ws.id);
+  const py = await getFileDetail(db, restored.find((f) => f.path.endsWith(".py"))!.id);
+  assert.ok(py.content.includes("batch_sise"));
+  assert.ok(py.issues.every((i) => i.status === "open"), "history cleared on reset");
+});

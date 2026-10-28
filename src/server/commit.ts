@@ -13,7 +13,8 @@ import { getFileDetail } from "./queries";
 /**
  * Closed-loop remediation. The stored patch (never client-supplied content) is written:
  * - server mode: by this process, atomically, after verifying the disk still holds `baseHash`;
- * - browser mode: by the client's directory handle, which must report the patch's exact hash.
+ * - browser mode: by the client's directory handle, which must report the patch's exact hash;
+ * - sample project: in the database only.
  * Then content/hash are updated, resolved issues are marked fixed, the new content is re-scanned,
  * and (optionally) the single file is committed to git.
  */
@@ -39,6 +40,8 @@ export async function commitPatch(db: AppDb, input: CommitInput): Promise<Commit
 
   if (ws.kind === "server") {
     await writeWorkspaceFileAtomic(ws.rootPath, file.path, newContent, file.contentHash);
+  } else if (ws.kind === "demo") {
+    // Sample project: the stored content is the source of truth, so there is no disk write to verify.
   } else if (input.writtenHash !== newHash) {
     throw new AppError(409, "INTEGRITY_FAILED", "The client-reported hash does not match the stored patch; the file on disk was not verified");
   }

@@ -68,7 +68,7 @@ export type EngineDto = "heuristic" | "hybrid";
 
 export interface WorkspaceDto {
   id: number;
-  kind: "server" | "browser";
+  kind: "server" | "browser" | "demo";
   name: string;
   rootPath: string;
   isGitRepo: boolean;

@@ -3,6 +3,7 @@ import { getDb } from "@/db";
 import { assertLocalRequest, handle, ok, parseId, readJson } from "@/lib/api";
 import { manifestSchema, type SyncResultDto } from "@/lib/contracts";
 import { assertSchemaReady } from "@/lib/db-init";
+import { AppError } from "@/lib/errors";
 import { walkWorkspace } from "@/lib/fs-desktop";
 import { getWorkspaceOr404, listWorkspaceDtos } from "@/server/queries";
 import { applyManifest, applySync } from "@/server/sync";
@@ -23,6 +24,9 @@ export const POST = handle<Ctx>(async (req: NextRequest, { params }) => {
   const db = await getDb();
   let ws = await getWorkspaceOr404(db, parseId((await params).id));
 
+  if (ws.kind === "demo") {
+    throw new AppError(409, "CONFLICT", "The sample project has no folder to sync; use POST /api/workspaces/{id}/reset to restore it");
+  }
   if (ws.kind === "browser") {
     const { entries } = await readJson(req, manifestSchema, 4 * 1024 * 1024);
     return ok(await applyManifest(db, ws, entries));

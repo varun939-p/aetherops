@@ -14,7 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
-export const workspaceKindEnum = pgEnum("workspace_kind", ["server", "browser"]);
+export const workspaceKindEnum = pgEnum("workspace_kind", ["server", "browser", "demo"]);
 
 export const fileStatusEnum = pgEnum("file_status", ["pending", "analyzing", "issues", "clean", "error"]);
 

@@ -20,10 +20,14 @@ export async function assertSchemaReady(): Promise<void> {
       exists (
         select 1 from information_schema.columns
         where table_schema = 'public' and table_name = 'files' and column_name = 'content_hash'
-      ) as has_hash
+      ) as has_hash,
+      exists (
+        select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+        where t.typname = 'workspace_kind' and e.enumlabel = 'demo'
+      ) as has_demo
   `);
-  const [row] = rowsOf<{ has_workspaces: boolean; has_scans: boolean; has_hash: boolean }>(result);
-  if (!row?.has_workspaces || !row.has_scans || !row.has_hash) {
+  const [row] = rowsOf<{ has_workspaces: boolean; has_scans: boolean; has_hash: boolean; has_demo: boolean }>(result);
+  if (!row?.has_workspaces || !row.has_scans || !row.has_hash || !row.has_demo) {
     throw new AppError(
       503,
       "SCHEMA_NOT_MIGRATED",
