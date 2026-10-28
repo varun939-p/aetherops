@@ -1,246 +1,334 @@
 "use client";
-import { useState, useMemo, useRef, useEffect } from "react";
-import { Skeleton, Button, SeverityBadge } from "./ui";
 
-interface Issue {
-  id?: number;
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { FileDetailDto, IssueDto, Severity } from "@/lib/contracts";
+import { buildDiff, type DiffModel } from "@/lib/diff-rows";
+import { highlightLines, type Token } from "@/lib/highlight";
+import { splitLines } from "@/lib/text";
+import { useVirtualRows } from "@/lib/use-virtual";
+import { cn, formatBytes, formatInt, relativeTime } from "@/lib/utils";
+import { Button, EmptyState, Icon, SEVERITY_BG, SEVERITY_ORDER, Segmented, SkeletonRows } from "./ui";
+
+const ROW_H = 20;
+
+export interface FocusRequest {
   line: number;
-  severity: string;
-  message: string;
-  source: string;
-  ruleId?: string;
+  nonce: number;
 }
 
-interface FileData {
-  id: number;
-  path: string;
-  content: string;
-  correctedContent?: string | null;
-  language: string;
-  status: string;
-  qualityScore?: number | null;
-  errorMessage?: string | null;
-  issues?: Issue[];
+function linesOf(content: string): string[] {
+  const lines = splitLines(content);
+  if (lines.length > 1 && /\r?\n$/.test(content)) lines.pop();
+  return lines;
 }
 
-function highlightLine(content: string, lang: string): string {
-  // Minimal highlighting placeholder - for portfolio we use mono but keep safe
-  return content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function Tokens({ tokens, fallback }: { tokens: Token[] | undefined; fallback: string }) {
+  if (!tokens) return <>{fallback || " "}</>;
+  if (tokens.length === 0) return <> </>;
+  return (
+    <>
+      {tokens.map((t, i) =>
+        t.cls ? (
+          <span key={i} className={`syn-${t.cls}`}>
+            {t.text}
+          </span>
+        ) : (
+          <span key={i}>{t.text}</span>
+        )
+      )}
+    </>
+  );
 }
 
-function CodePane({
-  code,
-  issues,
-  title,
-  isCorrected,
-  language,
-}: {
-  code: string;
-  issues: Issue[];
-  title: string;
-  isCorrected?: boolean;
-  language: string;
-}) {
-  const lines = code.split("\n");
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const issueMap = useMemo(() => {
-    const m = new Map<number, Issue[]>();
-    issues.forEach((iss) => {
-      const arr = m.get(iss.line) || [];
-      arr.push(iss);
-      m.set(iss.line, arr);
-    });
-    return m;
-  }, [issues]);
+function worst(issues: IssueDto[]): Severity | null {
+  for (const s of SEVERITY_ORDER) if (issues.some((i) => i.severity === s)) return s;
+  return null;
+}
+
+/** Scroll container + spacer for fixed-height virtual rows; width tracks the longest line. */
+function VirtualCode({ count, maxCols, gutterPx, focusIndex, focusNonce, render }: { count: number; maxCols: number; gutterPx: number; focusIndex: number | null; focusNonce: number; render: (index: number) => ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const v = useVirtualRows(ref, count, ROW_H, 20);
+  const { scrollToIndex } = v;
+  useEffect(() => {
+    if (focusIndex !== null) scrollToIndex(focusIndex, "center");
+  }, [focusIndex, focusNonce, scrollToIndex]);
 
   return (
-    <div className="flex flex-col h-full bg-[#0a1210] border border-[#1a2e25] rounded overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-[#0f1613] border-b border-[#1a2e25]">
-        <span className="text-[10px] tracking-widest font-mono text-[#6b8a7a]">{title}</span>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono text-[#4a6a5a]">{lines.length} lines • {language}</span>
-          {isCorrected && <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#00ff88]/10 text-[#00ff88] border border-[#00ff88]/20">AI RECTIFIED</span>}
-        </div>
-      </div>
-      <div ref={scrollRef} className="flex-1 overflow-auto font-mono text-[12px] leading-5">
-        <div className="min-w-max">
-          {lines.map((line, idx) => {
-            const lineNo = idx + 1;
-            const lineIssues = issueMap.get(lineNo) || [];
-            const hasCritical = lineIssues.some((i) => i.severity === "critical");
-            const hasIssue = lineIssues.length > 0;
-            return (
-              <div
-                key={idx}
-                className={`flex ${hasCritical ? "bg-[#ff3b5c]/10" : hasIssue ? "bg-[#ffcc33]/5" : ""} hover:bg-[#1a2e25]/50 group`}
-              >
-                <div className="sticky left-0 flex">
-                  <span className="w-12 text-right pr-3 py-0.5 text-[#3a4a44] select-none bg-[#0a1210] border-r border-[#1a2e25]/50">
-                    {String(lineNo).padStart(3, " ")}
-                  </span>
-                  <span className="w-4 text-center py-0.5">
-                    {hasIssue && <span className={`text-[10px] ${hasCritical ? "text-[#ff3b5c]" : "text-[#ffcc33]"}`}>●</span>}
-                  </span>
-                </div>
-                <pre className="pl-2 pr-4 py-0.5 whitespace-pre text-[#cde8d6] overflow-visible">
-                  {line || " "}
-                </pre>
-              </div>
-            );
-          })}
+    <div ref={ref} className="relative min-h-0 flex-1 overflow-auto bg-canvas">
+      <div style={{ height: v.totalHeight, minWidth: `calc(${maxCols}ch + ${gutterPx + 32}px)` }} className="relative">
+        <div style={{ transform: `translateY(${v.offset}px)` }} className="absolute inset-x-0 top-0 min-w-full">
+          {Array.from({ length: v.end - v.start }, (_, k) => render(v.start + k))}
         </div>
       </div>
     </div>
   );
 }
 
+function SourceView({ file, focus }: { file: FileDetailDto; focus: FocusRequest | null }) {
+  const lines = useMemo(() => linesOf(file.content), [file.content]);
+  const tokens = useMemo(() => highlightLines(lines, file.language), [lines, file.language]);
+  const byLine = useMemo(() => {
+    const m = new Map<number, IssueDto[]>();
+    for (const issue of file.issues) {
+      if (issue.status !== "open") continue;
+      for (let l = issue.line; l <= Math.min(issue.endLine, issue.line + 50); l++) m.set(l, [...(m.get(l) ?? []), issue]);
+    }
+    return m;
+  }, [file.issues]);
+  const maxCols = useMemo(() => lines.reduce((m, l) => Math.max(m, l.length), 0), [lines]);
+  const digits = String(lines.length).length;
+  const gutterPx = digits * 7.3 + 28;
+
+  return (
+    <VirtualCode
+      count={lines.length}
+      maxCols={maxCols}
+      gutterPx={gutterPx}
+      focusIndex={focus ? focus.line - 1 : null}
+      focusNonce={focus?.nonce ?? 0}
+      render={(i) => {
+        const lineNo = i + 1;
+        const issues = byLine.get(lineNo);
+        const sev = issues ? worst(issues) : null;
+        const focused = focus?.line === lineNo;
+        return (
+          <div key={i} className={cn("code flex h-5", focused ? "bg-accent/14" : sev === "critical" ? "bg-sev-critical/[0.07]" : sev ? "bg-hover/60" : "hover:bg-hover/50")}>
+            <span
+              className="tnum sticky left-0 z-10 flex shrink-0 items-center justify-end gap-1.5 border-r border-line bg-canvas pr-2 text-fg-faint select-none"
+              style={{ width: gutterPx }}
+              title={issues?.map((x) => `${x.severity.toUpperCase()} ${x.ruleId}: ${x.title}`).join("\n")}
+            >
+              <span className={cn(focused && "text-fg-muted")}>{lineNo}</span>
+              <span className={cn("h-3.5 w-[3px] rounded-[1px]", sev ? SEVERITY_BG[sev] : "bg-transparent")} />
+            </span>
+            <span className="pl-3 pr-6 text-syn-plain">
+              <Tokens tokens={tokens[i]} fallback={lines[i]} />
+            </span>
+          </div>
+        );
+      }}
+    />
+  );
+}
+
+function DiffView({ before, after, language, layout }: { before: string; after: string; language: string; layout: "unified" | "split" }) {
+  const diff: DiffModel = useMemo(() => buildDiff(before, after), [before, after]);
+  const beforeLines = useMemo(() => linesOf(before), [before]);
+  const afterLines = useMemo(() => linesOf(after), [after]);
+  const beforeTokens = useMemo(() => highlightLines(beforeLines, language), [beforeLines, language]);
+  const afterTokens = useMemo(() => highlightLines(afterLines, language), [afterLines, language]);
+  const maxCols = useMemo(() => Math.max(...beforeLines.map((l) => l.length), ...afterLines.map((l) => l.length), 0), [beforeLines, afterLines]);
+  const digits = String(Math.max(beforeLines.length, afterLines.length)).length;
+  const num = digits * 7.3 + 12;
+
+  const gap = (hidden: number | undefined, key: number) => (
+    <div key={key} className="code flex h-5 items-center border-y border-line bg-surface pl-3 text-[11px] text-fg-subtle">
+      ⋯ {formatInt(hidden ?? 0)} unchanged line{hidden === 1 ? "" : "s"}
+    </div>
+  );
+
+  if (diff.added === 0 && diff.removed === 0) return <EmptyState title="Patch is identical to the current file" />;
+
+  if (layout === "unified") {
+    return (
+      <VirtualCode
+        count={diff.unified.length}
+        maxCols={maxCols}
+        gutterPx={num * 2 + 16}
+        focusIndex={null}
+        focusNonce={0}
+        render={(i) => {
+          const r = diff.unified[i];
+          if (r.kind === "gap") return gap(r.hidden, i);
+          const tokens = r.kind === "add" ? afterTokens[r.newNo! - 1] : beforeTokens[r.oldNo! - 1];
+          return (
+            <div key={i} className={cn("code flex h-5", r.kind === "add" && "bg-diff-add", r.kind === "del" && "bg-diff-del")}>
+              <span className="tnum sticky left-0 z-10 flex shrink-0 border-r border-line bg-canvas text-fg-faint select-none">
+                <span className="pr-2 text-right" style={{ width: num }}>{r.oldNo ?? ""}</span>
+                <span className="pr-2 text-right" style={{ width: num }}>{r.newNo ?? ""}</span>
+                <span className={cn("w-4 text-center", r.kind === "add" ? "text-ok" : r.kind === "del" ? "text-sev-critical" : "")}>{r.kind === "add" ? "+" : r.kind === "del" ? "−" : ""}</span>
+              </span>
+              <span className="pl-2 pr-6 text-syn-plain">
+                <Tokens tokens={tokens} fallback={r.text} />
+              </span>
+            </div>
+          );
+        }}
+      />
+    );
+  }
+
+  return (
+    <VirtualCode
+      count={diff.split.length}
+      maxCols={maxCols * 2}
+      gutterPx={num * 2}
+      focusIndex={null}
+      focusNonce={0}
+      render={(i) => {
+        const r = diff.split[i];
+        if (r.kind === "gap") return gap(r.hidden, i);
+        const side = (cell: typeof r.left, tokens: Token[][], tone: "add" | "del") => (
+          <div className={cn("flex min-w-0 flex-1 overflow-hidden", cell?.changed && (tone === "add" ? "bg-diff-add" : "bg-diff-del"), !cell && "bg-surface/60")}>
+            <span className="tnum shrink-0 border-r border-line pr-2 text-right text-fg-faint select-none" style={{ width: num }}>
+              {cell?.no ?? ""}
+            </span>
+            <span className="truncate pl-2 pr-3 text-syn-plain">{cell ? <Tokens tokens={tokens[cell.no - 1]} fallback={cell.text} /> : " "}</span>
+          </div>
+        );
+        return (
+          <div key={i} className="code flex h-5 divide-x divide-line">
+            {side(r.left, beforeTokens, "del")}
+            {side(r.right, afterTokens, "add")}
+          </div>
+        );
+      }}
+    />
+  );
+}
+
 export function CodeViewport({
   file,
   loading,
-  onCommit,
-  onReanalyze,
+  focus,
+  aiConfigured,
+  canGitCommit,
+  analyzing,
   committing,
-  reanalyzing,
+  onAnalyze,
+  onCommit,
 }: {
-  file: FileData | null;
+  file: FileDetailDto | undefined;
   loading: boolean;
-  onCommit: () => void;
-  onReanalyze: () => void;
+  focus: FocusRequest | null;
+  aiConfigured: boolean;
+  canGitCommit: boolean;
+  analyzing: boolean;
   committing: boolean;
-  reanalyzing: boolean;
+  onAnalyze: () => void;
+  onCommit: (opts: { git: boolean }) => void;
 }) {
-  const [view, setView] = useState<"split" | "original" | "corrected">("split");
+  const [view, setView] = useState<"source" | "diff">("source");
+  const [layout, setLayout] = useState<"unified" | "split">("unified");
+  const [git, setGit] = useState(true);
+  const [prevFocus, setPrevFocus] = useState(focus);
+  const [prevHash, setPrevHash] = useState(file?.contentHash);
 
-  if (loading) {
-    return (
-      <div className="h-full p-3 space-y-3">
-        <Skeleton className="h-8 w-full" />
-        <div className="grid grid-cols-2 gap-3 h-[500px]">
-          <Skeleton className="h-full w-full" />
-          <Skeleton className="h-full w-full" />
-        </div>
-      </div>
-    );
+  // A jump request from the issue tracker always lands in the source view.
+  if (focus !== prevFocus) {
+    setPrevFocus(focus);
+    if (focus && view !== "source") setView("source");
+  }
+  // New content (another file, or a committed patch) returns to the source view.
+  if (file?.contentHash !== prevHash) {
+    setPrevHash(file?.contentHash);
+    if (view !== "source") setView("source");
   }
 
   if (!file) {
     return (
-      <div className="h-full flex flex-col items-center justify-center p-8 text-center bg-[#0a1210] border border-dashed border-[#1a2e25] rounded m-3">
-        <div className="text-3xl mb-3 opacity-20">◧</div>
-        <div className="text-xs font-mono tracking-widest text-[#4a6a5a]">NO FILE SELECTED</div>
-        <div className="text-[11px] font-mono text-[#2a3e35] mt-2 max-w-[280px]">Select a file from the repository explorer to view its source and AI remediation</div>
-      </div>
+      <section className="flex min-h-0 flex-col bg-canvas" aria-label="Code viewport">
+        {loading ? <SkeletonRows rows={22} /> : <EmptyState title="No file selected">Select a file in the explorer, or an issue in the tracker to jump to its line.</EmptyState>}
+      </section>
     );
   }
 
-  const issues = file.issues || [];
-  const corrected = file.correctedContent || "";
+  const openIssues = file.issues.filter((i) => i.status === "open").length;
+  const patchReady = file.patchCommittable && !!file.correctedContent;
+  const engineLabel = file.engine === "hybrid" ? "AI + HEURISTIC" : file.engine === "heuristic" ? "HEURISTIC" : "NOT ANALYZED";
+
+  const commitClick = () => {
+    if (view !== "diff") {
+      setView("diff");
+      return;
+    }
+    onCommit({ git: canGitCommit && git });
+  };
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[#1a2e25] bg-[#0f1613]">
-        <div className="flex items-center gap-2">
-          <span className="text-[#00ff88]">⚡</span>
-          <span className="text-[11px] tracking-widest font-mono text-white">AI CODE RESOLUTION</span>
-          <span className="text-[10px] font-mono text-[#6b8a7a]">File: <span className="text-[#00ff88]">{file.path}</span></span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button onClick={() => setView("original")} className={`text-[10px] px-2 py-1 rounded font-mono ${view === "original" ? "bg-[#1a2e25] text-white" : "text-[#6b8a7a]"}`}>ORIGINAL</button>
-          <button onClick={() => setView("split")} className={`text-[10px] px-2 py-1 rounded font-mono ${view === "split" ? "bg-[#1a2e25] text-white" : "text-[#6b8a7a]"}`}>SPLIT</button>
-          <button onClick={() => setView("corrected")} className={`text-[10px] px-2 py-1 rounded font-mono ${view === "corrected" ? "bg-[#1a2e25] text-white" : "text-[#6b8a7a]"}`}>CORRECTED</button>
-        </div>
-      </div>
-
-      {/* Status bar */}
-      <div className="flex items-center justify-between px-3 py-2 bg-[#0a0f0e] border-b border-[#1a2e25]">
-        <div className="flex items-center gap-3">
-          <span className={`text-[10px] px-2 py-0.5 rounded border font-mono tracking-wide ${
-            file.status === "clean" ? "bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20" :
-            file.status === "issues" ? "bg-[#ff3b5c]/10 text-[#ff3b5c] border-[#ff3b5c]/20" :
-            file.status === "error" ? "bg-[#ff3b5c]/20 text-[#ff3b5c] border-[#ff3b5c]/30" :
-            file.status === "analyzing" ? "bg-[#00d4ff]/10 text-[#00d4ff] border-[#00d4ff]/20" :
-            "bg-[#ffcc33]/10 text-[#ffcc33] border-[#ffcc33]/20"
-          }`}>
-            {file.status.toUpperCase()} {file.status === "issues" ? `• ${issues.length} ISSUES` : ""} {file.qualityScore ? `• Q:${file.qualityScore}` : ""}
-          </span>
-          {file.errorMessage && <span className="text-[10px] text-[#ff3b5c] font-mono truncate max-w-[300px]">{file.errorMessage}</span>}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onReanalyze} loading={reanalyzing}>↻ RE-ANALYZE</Button>
-          {corrected && (
-            <Button variant="primary" size="sm" onClick={onCommit} loading={committing} disabled={file.status === "clean"}>⚡ COMMIT FIX</Button>
+    <section className="flex min-h-0 flex-col bg-canvas" aria-label="Code viewport">
+      <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
+        <Icon name="file" size={13} className="text-fg-subtle" />
+        <span className="min-w-0 truncate font-mono text-[12px] text-fg" title={file.path}>
+          {file.path}
+        </span>
+        <span className="tnum hidden shrink-0 items-center gap-2.5 font-mono text-[10.5px] text-fg-subtle md:flex">
+          <span>{file.language}</span>
+          <span>{formatInt(file.lineCount)} LOC</span>
+          <span>{formatBytes(file.fileSize)}</span>
+          <span title={`sha256 ${file.contentHash}`}>{file.contentHash.slice(0, 10)}</span>
+          <span>{file.eol.toUpperCase()}</span>
+        </span>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Segmented
+            value={view}
+            onChange={setView}
+            options={[
+              { value: "source", label: "Source" },
+              { value: "diff", label: patchReady ? "Diff" : "Diff (none)" },
+            ]}
+          />
+          {view === "diff" && patchReady && (
+            <Segmented
+              value={layout}
+              onChange={setLayout}
+              options={[
+                { value: "unified", label: "Unified" },
+                { value: "split", label: "Split" },
+              ]}
+            />
           )}
         </div>
       </div>
 
-      {/* Code panes */}
-      <div className="flex-1 overflow-hidden p-2 bg-[#050a09]">
-        {file.status === "error" ? (
-          <div className="h-full flex flex-col items-center justify-center p-6 bg-[#1a1010] border border-[#ff3b5c]/20 rounded">
-            <div className="text-[#ff3b5c] text-xs font-mono tracking-widest mb-2">ANALYSIS ERROR</div>
-            <div className="text-[11px] font-mono text-[#ff8a8a] max-w-[500px] text-center mb-4">{file.errorMessage || "AI analysis failed. Check GEMINI_API_KEY and retry."}</div>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={onReanalyze}>RETRY ANALYSIS</Button>
-            </div>
-            {issues.length > 0 && (
-              <div className="mt-4 w-full max-w-[600px]">
-                <div className="text-[10px] text-[#6b8a7a] font-mono mb-2">Heuristic results (fast-scan) still available:</div>
-                <CodePane code={file.content} issues={issues} title="VULNERABLE SOURCE (HEURISTIC)" language={file.language} />
-              </div>
-            )}
-          </div>
-        ) : view === "split" ? (
-          <div className="grid grid-cols-2 gap-2 h-full">
-            <CodePane code={file.content} issues={issues} title="VULNERABLE SOURCE CODE" language={file.language} />
-            {corrected ? (
-              <CodePane code={corrected} issues={[]} title="AI RECTIFIED CODE" language={file.language} isCorrected />
-            ) : (
-              <div className="flex flex-col items-center justify-center bg-[#0a1210] border border-[#1a2e25] rounded">
-                {file.status === "analyzing" || file.status === "pending" ? (
-                  <>
-                    <div className="w-6 h-6 border-2 border-[#00ff88] border-t-transparent rounded-full animate-spin mb-3" />
-                    <div className="text-[11px] font-mono text-[#6b8a7a]">AI is rectifying code...</div>
-                    <div className="text-[10px] font-mono text-[#4a6a5a] mt-1">This may take a few seconds</div>
-                  </>
-                ) : file.status === "clean" ? (
-                  <>
-                    <div className="text-[#00ff88] text-2xl mb-2">✓</div>
-                    <div className="text-[11px] font-mono text-[#00ff88]">CODE IS CLEAN</div>
-                    <div className="text-[10px] font-mono text-[#4a6a5a] mt-1">No issues detected</div>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-[11px] font-mono text-[#6b8a7a]">No corrected code yet</div>
-                    <Button variant="ghost" size="sm" onClick={onReanalyze} className="mt-2">Analyze</Button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        ) : view === "original" ? (
-          <CodePane code={file.content} issues={issues} title="VULNERABLE SOURCE CODE" language={file.language} />
-        ) : (
-          <CodePane code={corrected || file.content} issues={[]} title={corrected ? "AI RECTIFIED CODE" : "ORIGINAL (NO FIX YET)"} language={file.language} isCorrected={!!corrected} />
-        )}
+      <div className="flex h-9 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
+        <span
+          className={cn(
+            "rounded-[2px] border px-1.5 py-px font-mono text-[10px] font-semibold tracking-wide",
+            file.status === "error" ? "border-sev-critical/40 text-sev-critical" : file.status === "clean" ? "border-ok/40 text-ok" : file.status === "issues" ? "border-sev-medium/40 text-sev-medium" : "border-line-strong text-fg-muted"
+          )}
+        >
+          {file.status.toUpperCase()}
+        </span>
+        <span className="shrink-0 whitespace-nowrap font-mono text-[10.5px] text-fg-subtle">{engineLabel}</span>
+        <span className="tnum min-w-0 truncate whitespace-nowrap font-mono text-[10.5px] text-fg-muted">
+          {openIssues} open{file.qualityScore !== null && ` · Q ${file.qualityScore}`}
+          {file.stale && " · modified since analysis"}
+        </span>
+        <span className="hidden min-w-0 truncate whitespace-nowrap font-mono text-[10.5px] text-fg-subtle 2xl:inline">{file.modelUsed ? `${file.modelUsed} · ` : ""}{relativeTime(file.lastAnalyzedAt)}</span>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Button size="xs" variant="ghost" icon="refresh" loading={analyzing || file.status === "analyzing"} onClick={onAnalyze} title={aiConfigured ? "Run hybrid AI + heuristic analysis" : "AI not configured: runs the deterministic engine"}>
+            {aiConfigured ? "Deep analyze" : "Re-scan"}
+          </Button>
+          {patchReady && canGitCommit && view === "diff" && (
+            <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-fg-muted">
+              <input type="checkbox" checked={git} onChange={(e) => setGit(e.target.checked)} className="size-3 accent-[var(--color-accent)]" />
+              git commit
+            </label>
+          )}
+          <Button size="xs" variant="primary" icon="commit" disabled={!patchReady} loading={committing} onClick={commitClick} title={patchReady ? undefined : "No patch for the current content"}>
+            {view === "diff" ? "Apply & commit patch" : "Review patch"}
+          </Button>
+        </div>
       </div>
 
-      {/* Issues list bottom */}
-      {issues.length > 0 && file.status !== "error" && (
-        <div className="border-t border-[#1a2e25] bg-[#0f1613] max-h-[160px] overflow-auto">
-          <div className="px-3 py-1.5 text-[10px] tracking-widest font-mono text-[#6b8a7a] border-b border-[#1a2e25]/50">ISSUES ({issues.length}) — sorted critical first</div>
-          <div className="divide-y divide-[#1a2e25]/50">
-            {issues.map((iss, i) => (
-              <div key={i} className="flex items-start gap-2 px-3 py-1.5 hover:bg-[#1a2e25]/30">
-                <SeverityBadge severity={iss.severity} />
-                <span className="text-[11px] font-mono text-[#4a6a5a] min-w-[50px]">L{iss.line}</span>
-                <span className="text-[11px] font-mono text-[#d6ffe8] flex-1">{iss.message}</span>
-                <span className="text-[9px] font-mono text-[#4a6a5a]">{iss.source} • {iss.ruleId}</span>
-              </div>
-            ))}
-          </div>
+      {(file.errorMessage || file.summary) && (
+        <div className={cn("flex shrink-0 items-start gap-2 border-b border-line px-3 py-1.5 text-[11.5px]", file.errorMessage ? "bg-sev-critical/[0.06] text-sev-critical" : "text-fg-muted")}>
+          {file.errorMessage && <Icon name="alert" size={13} className="mt-px" />}
+          <span className="line-clamp-2">{file.errorMessage ?? file.summary}</span>
         </div>
       )}
-    </div>
+
+      {view === "source" ? (
+        <SourceView file={file} focus={focus} />
+      ) : patchReady ? (
+        <DiffView before={file.content} after={file.correctedContent!} language={file.language} layout={layout} />
+      ) : (
+        <EmptyState title="No patch for this revision">
+          {aiConfigured ? "Run Deep analyze to generate a line-range patch for the current content." : "Patches are generated by the AI engine. Configure GEMINI_API_KEY and GEMINI_MODEL to enable remediation."}
+        </EmptyState>
+      )}
+    </section>
   );
 }

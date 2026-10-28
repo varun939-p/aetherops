@@ -1,322 +1,223 @@
 "use client";
-import { useState, useMemo } from "react";
-import { StatusBadge, Skeleton } from "./ui";
-import { getFileNameFromPath } from "@/lib/utils";
 
-export interface FileItem {
-  id: number;
-  path: string;
-  language: string;
-  status: string;
-  issuesCount?: number;
-  criticalCount?: number;
-  fileSize: number;
-  lineCount: number;
-  content?: string;
-  extension?: string;
-}
+import { useMemo, useRef, useState } from "react";
+import type { FileSummaryDto } from "@/lib/contracts";
+import { useVirtualRows } from "@/lib/use-virtual";
+import { basename, cn, fuzzyMatch } from "@/lib/utils";
+import { FileStatusMark, HighlightedText, Icon, PaneHeader, Segmented, SkeletonRows, EmptyState } from "./ui";
 
-interface TreeNode {
+interface DirNode {
   name: string;
   path: string;
-  isDir: boolean;
-  children: Map<string, TreeNode>;
-  file?: FileItem;
+  dirs: Map<string, DirNode>;
+  files: FileSummaryDto[];
+  open: number;
+  critical: number;
 }
 
-function buildTree(files: FileItem[]): TreeNode {
-  const root: TreeNode = { name: "root", path: "", isDir: true, children: new Map() };
+type Row =
+  | { kind: "dir"; node: DirNode; depth: number }
+  | { kind: "file"; file: FileSummaryDto; depth: number; positions?: number[] };
+
+const ROW_H = 24;
+
+function buildTree(files: FileSummaryDto[]): DirNode {
+  const root: DirNode = { name: "", path: "", dirs: new Map(), files: [], open: 0, critical: 0 };
   for (const f of files) {
-    const parts = f.path.split("/").filter(Boolean);
+    const parts = f.path.split("/");
     let cur = root;
-    let curPath = "";
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      curPath = curPath ? `${curPath}/${part}` : part;
-      const isLast = i === parts.length - 1;
-      if (!cur.children.has(part)) {
-        cur.children.set(part, {
-          name: part,
-          path: curPath,
-          isDir: !isLast,
-          children: new Map(),
-          file: isLast ? f : undefined,
-        });
+    cur.open += f.openIssues;
+    cur.critical += f.criticalIssues;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const path = parts.slice(0, i + 1).join("/");
+      let next = cur.dirs.get(parts[i]);
+      if (!next) {
+        next = { name: parts[i], path, dirs: new Map(), files: [], open: 0, critical: 0 };
+        cur.dirs.set(parts[i], next);
       }
-      const next = cur.children.get(part)!;
-      if (isLast) next.file = f;
+      next.open += f.openIssues;
+      next.critical += f.criticalIssues;
       cur = next;
     }
+    cur.files.push(f);
   }
   return root;
 }
 
-function TreeView({
-  node,
-  depth,
-  selectedPath,
-  onSelect,
-  expandedPaths,
-  toggleExpand,
-}: {
-  node: TreeNode;
-  depth: number;
-  selectedPath: string | null;
-  onSelect: (file: FileItem) => void;
-  expandedPaths: Set<string>;
-  toggleExpand: (p: string) => void;
-}) {
-  const isExpanded = expandedPaths.has(node.path);
-  const isSelected = node.file && selectedPath === node.file.path;
-
-  if (!node.isDir) {
-    const f = node.file!;
-    return (
-      <div
-        onClick={() => onSelect(f)}
-        className={`group flex items-center gap-2 px-2 py-1.5 mx-1 rounded cursor-pointer text-xs font-mono transition-colors ${
-          isSelected ? "bg-[#00ff88]/10 text-[#00ff88] border border-[#00ff88]/20" : "text-[#6b8a7a] hover:text-[#d6ffe8] hover:bg-[#1a2e25]"
-        }`}
-        style={{ marginLeft: depth * 12 + 4 }}
-      >
-        <span className="text-[10px]">{f.status === "issues" ? "◉" : f.status === "clean" ? "◎" : "◍"}</span>
-        <span className="truncate flex-1">{node.name}</span>
-        {f.issuesCount ? (
-          <span className={`text-[9px] px-1 rounded ${f.criticalCount ? "bg-[#ff3b5c]/20 text-[#ff3b5c]" : "bg-[#ffcc33]/20 text-[#ffcc33]"}`}>
-            {f.issuesCount}
-          </span>
-        ) : null}
-      </div>
-    );
+function flatten(node: DirNode, expanded: Set<string>, depth: number, out: Row[]): Row[] {
+  const dirs = [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
+  for (const d of dirs) {
+    // Collapse single-child directory chains (src/app/api → one row) like modern IDEs.
+    let collapsed = d;
+    let label = d.name;
+    while (collapsed.files.length === 0 && collapsed.dirs.size === 1) {
+      collapsed = [...collapsed.dirs.values()][0];
+      label += `/${collapsed.name}`;
+    }
+    out.push({ kind: "dir", node: { ...collapsed, name: label }, depth });
+    if (expanded.has(collapsed.path)) flatten(collapsed, expanded, depth + 1, out);
   }
-
-  // dir
-  const children = Array.from(node.children.values()).sort((a, b) => {
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  // root don't render itself
-  if (depth === -1) {
-    return (
-      <>
-        {children.map((ch) => (
-          <TreeView
-            key={ch.path}
-            node={ch}
-            depth={0}
-            selectedPath={selectedPath}
-            onSelect={onSelect}
-            expandedPaths={expandedPaths}
-            toggleExpand={toggleExpand}
-          />
-        ))}
-      </>
-    );
-  }
-
-  return (
-    <div>
-      <div
-        onClick={() => toggleExpand(node.path)}
-        className="flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono text-[#4a6a5a] hover:text-[#6b8a7a] cursor-pointer"
-        style={{ marginLeft: depth * 12 + 4 }}
-      >
-        <span className="text-[10px] w-3">{isExpanded ? "▼" : "▶"}</span>
-        <span>📁</span>
-        <span className="truncate">{node.name}</span>
-      </div>
-      {isExpanded && (
-        <div>
-          {children.map((ch) => (
-            <TreeView
-              key={ch.path}
-              node={ch}
-              depth={depth + 1}
-              selectedPath={selectedPath}
-              onSelect={onSelect}
-              expandedPaths={expandedPaths}
-              toggleExpand={toggleExpand}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  for (const f of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) out.push({ kind: "file", file: f, depth });
+  return out;
 }
+
+type Quick = "all" | "faults" | "modified";
 
 export function RepositoryExplorer({
   files,
-  selectedPath,
-  onSelectFile,
   loading,
+  selectedId,
+  onSelect,
+  onAnalyze,
+  onDelete,
 }: {
-  files: FileItem[];
-  selectedPath: string | null;
-  onSelectFile: (f: FileItem) => void;
+  files: FileSummaryDto[] | undefined;
   loading: boolean;
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+  onAnalyze: (id: number) => void;
+  onDelete: (file: FileSummaryDto) => void;
 }) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [quick, setQuick] = useState<Quick>("all");
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const tree = useMemo(() => buildTree(files), [files]);
+  const visibleFiles = useMemo(() => {
+    const list = files ?? [];
+    if (quick === "faults") return list.filter((f) => f.openIssues > 0 || f.status === "error");
+    if (quick === "modified") return list.filter((f) => f.stale || f.status === "pending" || f.status === "analyzing");
+    return list;
+  }, [files, quick]);
 
-  const toggleExpand = (p: string) => {
-    setExpanded((prev) => {
+  const tree = useMemo(() => buildTree(visibleFiles), [visibleFiles]);
+
+  const rows = useMemo<Row[]>(() => {
+    if (query.trim()) {
+      return visibleFiles
+        .map((file) => ({ file, m: fuzzyMatch(query.trim(), file.path) }))
+        .filter((x): x is { file: FileSummaryDto; m: NonNullable<ReturnType<typeof fuzzyMatch>> } => x.m !== null)
+        .sort((a, b) => b.m.score - a.m.score)
+        .slice(0, 500)
+        .map(({ file, m }) => ({ kind: "file" as const, file, depth: 0, positions: m.positions }));
+    }
+    // Every directory is expanded unless the user collapsed it.
+    const expanded = new Set<string>();
+    const walk = (n: DirNode) => n.dirs.forEach((d) => {
+      if (!collapsedDirs.has(d.path)) expanded.add(d.path);
+      walk(d);
+    });
+    walk(tree);
+    return flatten(tree, expanded, 0, []);
+  }, [query, visibleFiles, tree, collapsedDirs]);
+
+  const v = useVirtualRows(scrollRef, rows.length, ROW_H);
+  const toggle = (path: string) =>
+    setCollapsedDirs((prev) => {
       const next = new Set(prev);
-      if (next.has(p)) next.delete(p);
-      else next.add(p);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
       return next;
     });
-  };
 
-  // Auto expand all on first load if small
-  useMemo(() => {
-    if (files.length > 0 && files.length < 50) {
-      const allDirs = new Set<string>();
-      files.forEach((f) => {
-        const parts = f.path.split("/").slice(0, -1);
-        let cur = "";
-        parts.forEach((part) => {
-          cur = cur ? `${cur}/${part}` : part;
-          allDirs.add(cur);
-        });
-      });
-      setExpanded(allDirs);
-    }
-  }, [files]);
-
-  if (loading) {
-    return (
-      <div className="p-3 space-y-2">
-        {[...Array(8)].map((_, i) => (
-          <Skeleton key={i} className="h-6 w-full" />
-        ))}
-      </div>
-    );
-  }
-
-  if (files.length === 0) {
-    return (
-      <div className="p-6 text-center">
-        <div className="text-[#4a6a5a] text-xs font-mono">No files synced yet</div>
-        <div className="text-[10px] text-[#2a3e35] mt-1 font-mono">Link a folder to start SRE Watchdog</div>
-      </div>
-    );
-  }
+  const faults = (files ?? []).filter((f) => f.criticalIssues > 0).length;
 
   return (
-    <div className="h-full overflow-y-auto py-2">
-      <div className="px-3 pb-2 flex items-center justify-between">
-        <span className="text-[10px] tracking-[0.2em] text-[#6b8a7a] font-mono">REPOSITORY EXPLORER</span>
-        <span className="text-[10px] text-[#4a6a5a] font-mono">{files.length} files</span>
-      </div>
-      <TreeView
-        node={tree}
-        depth={-1}
-        selectedPath={selectedPath}
-        onSelect={onSelectFile}
-        expandedPaths={expanded}
-        toggleExpand={toggleExpand}
-      />
-    </div>
-  );
-}
-
-export function FileStreamTable({
-  files,
-  selectedPath,
-  onSelect,
-  onDelete,
-  onReanalyze,
-  filter,
-  setFilter,
-  search,
-}: {
-  files: FileItem[];
-  selectedPath: string | null;
-  onSelect: (f: FileItem) => void;
-  onDelete: (f: FileItem) => void;
-  onReanalyze: (f: FileItem) => void;
-  filter: string;
-  setFilter: (s: string) => void;
-  search: string;
-}) {
-  const filtered = files.filter((f) => {
-    if (filter === "vuln") return f.status === "issues" || f.status === "error";
-    if (filter !== "all") return f.status === filter;
-    return true;
-  }).filter((f) => f.path.toLowerCase().includes(search.toLowerCase()));
-
-  return (
-    <div className="bg-[#0f1613] border border-[#1a2e25] rounded overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#1a2e25]">
-        <div className="flex items-center gap-2">
-          <span className="text-[#00ff88]">🗂</span>
-          <span className="text-[11px] tracking-[0.15em] text-white font-mono">DESKTOP FILE STREAM</span>
-        </div>
-        <div className="flex items-center gap-1 bg-[#050a09] rounded p-0.5 border border-[#1a2e25]">
-          <button
-            onClick={() => setFilter("all")}
-            className={`text-[10px] px-2.5 py-1 rounded font-mono tracking-wide ${filter === "all" ? "bg-[#1a2e25] text-white" : "text-[#6b8a7a]"}`}
-          >
-            ALL ({files.length})
-          </button>
-          <button
-            onClick={() => setFilter("vuln")}
-            className={`text-[10px] px-2 py-1 rounded font-mono tracking-wide ${filter === "vuln" ? "bg-[#2e1a1e] text-[#ff3b5c]" : "text-[#6b8a7a]"}`}
-          >
-            Vuln
-          </button>
-        </div>
+    <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Repository explorer">
+      <PaneHeader title="Explorer">
+        <span className="tnum font-mono text-[10.5px] font-normal normal-case tracking-normal text-fg-subtle">
+          {files ? `${files.length} files${faults ? ` · ${faults} critical` : ""}` : ""}
+        </span>
+      </PaneHeader>
+      <div className="flex shrink-0 flex-col gap-2 border-b border-line p-2">
+        <label className="flex h-7 items-center gap-2 rounded-[3px] border border-line-strong bg-canvas px-2 focus-within:border-accent">
+          <Icon name="search" size={12} className="text-fg-subtle" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && rows[0]?.kind === "file") onSelect(rows[0].file.id);
+              if (e.key === "Escape") setQuery("");
+            }}
+            placeholder="Filter files (fuzzy)"
+            spellCheck={false}
+            className="min-w-0 flex-1 bg-transparent font-mono text-[11.5px] text-fg outline-none placeholder:text-fg-faint"
+          />
+        </label>
+        <Segmented<Quick>
+          size="xs"
+          value={quick}
+          onChange={setQuick}
+          options={[
+            { value: "all", label: "All" },
+            { value: "faults", label: "Faults" },
+            { value: "modified", label: "Modified" },
+          ]}
+        />
       </div>
 
-      <div className="grid grid-cols-[1fr_100px_100px_80px] text-[10px] tracking-widest text-[#4a6a5a] font-mono px-4 py-2 bg-[#0a1210] border-b border-[#1a2e25]">
-        <span>SCRIPT FILENAME</span>
-        <span>STATUS</span>
-        <span>AUDIT RESULT</span>
-        <span className="text-right">ACTIONS</span>
-      </div>
-
-      <div className="max-h-[180px] overflow-y-auto">
-        {filtered.length === 0 ? (
-          <div className="px-4 py-8 text-center text-[11px] text-[#4a6a5a] font-mono">No files match filter</div>
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
+        {loading && !files ? (
+          <SkeletonRows rows={14} />
+        ) : rows.length === 0 ? (
+          <EmptyState title={files?.length ? "No matching files" : "No files"}>
+            {files?.length ? "Adjust the filter." : "Link a workspace to ingest a repository."}
+          </EmptyState>
         ) : (
-          filtered.map((f) => (
-            <div
-              key={f.id}
-              className={`grid grid-cols-[1fr_100px_100px_80px] items-center px-4 py-2.5 text-xs font-mono border-b border-[#1a2e25]/50 hover:bg-[#1a2e25]/30 cursor-pointer transition-colors ${
-                selectedPath === f.path ? "bg-[#00ff88]/5 border-l-2 border-l-[#00ff88]" : ""
-              }`}
-              onClick={() => onSelect(f)}
-            >
-              <div className="flex items-center gap-2 truncate">
-                <span className="text-[#00ff88]/70">📄</span>
-                <span className="truncate text-[#d6ffe8]">{f.path}</span>
-              </div>
-              <div>
-                {f.status === "pending" ? (
-                  <span className="text-[#ffcc33] text-[10px]">● Pending</span>
-                ) : f.status === "analyzing" ? (
-                  <span className="text-[#00d4ff] text-[10px] animate-pulse">● Analyzing</span>
-                ) : f.status === "issues" ? (
-                  <span className="text-[#ff3b5c] text-[10px]">● Issues</span>
-                ) : f.status === "clean" ? (
-                  <span className="text-[#00ff88] text-[10px]">● Clean</span>
-                ) : f.status === "error" ? (
-                  <span className="text-[#ff3b5c] text-[10px]">● Error</span>
+          <div style={{ height: v.totalHeight }} className="relative">
+            <div style={{ transform: `translateY(${v.offset}px)` }} className="absolute inset-x-0 top-0">
+              {rows.slice(v.start, v.end).map((row) =>
+                row.kind === "dir" ? (
+                  <button
+                    key={`d:${row.node.path}`}
+                    type="button"
+                    onClick={() => toggle(row.node.path)}
+                    className="flex h-6 w-full items-center gap-1 pr-2 text-left text-[12px] text-fg-muted hover:bg-hover"
+                    style={{ paddingLeft: 8 + row.depth * 12 }}
+                  >
+                    <Icon name={collapsedDirs.has(row.node.path) ? "chevronRight" : "chevronDown"} size={12} className="text-fg-subtle" />
+                    <span className="truncate font-mono text-[11.5px]">{row.node.name}</span>
+                    {row.node.critical > 0 && <span className="tnum ml-auto font-mono text-[10.5px] text-sev-critical">{row.node.critical}</span>}
+                  </button>
                 ) : (
-                  <StatusBadge status="synced" />
-                )}
-              </div>
-              <div className="text-[#6b8a7a] text-[10px]">{f.issuesCount ? `${f.issuesCount} issues` : f.status === "clean" ? "Clean" : "-"}</div>
-              <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => onReanalyze(f)} className="text-[#6b8a7a] hover:text-[#00ff88] text-[11px]">↻</button>
-                <button onClick={() => onDelete(f)} className="text-[#6b8a7a] hover:text-[#ff3b5c] text-[11px]">🗑</button>
-              </div>
+                  <div
+                    key={`f:${row.file.id}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-current={row.file.id === selectedId ? "true" : undefined}
+                    onClick={() => onSelect(row.file.id)}
+                    onKeyDown={(e) => e.key === "Enter" && onSelect(row.file.id)}
+                    title={row.file.path}
+                    className={cn(
+                      "group flex h-6 cursor-pointer items-center gap-2 pr-1.5 text-[12px]",
+                      row.file.id === selectedId ? "bg-accent/12 text-fg shadow-[inset_2px_0_0_var(--color-accent)]" : "text-fg-muted hover:bg-hover hover:text-fg"
+                    )}
+                    style={{ paddingLeft: 8 + row.depth * 12 + 13 }}
+                  >
+                    <span className="flex w-2.5 justify-center">
+                      <FileStatusMark status={row.file.status} critical={row.file.criticalIssues} stale={row.file.stale} />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
+                      {row.positions ? <HighlightedText text={row.file.path} positions={row.positions} /> : basename(row.file.path)}
+                    </span>
+                    {row.file.openIssues > 0 && (
+                      <span className={cn("tnum font-mono text-[10.5px] group-hover:hidden", row.file.criticalIssues ? "text-sev-critical" : "text-fg-subtle")}>{row.file.openIssues}</span>
+                    )}
+                    <span className="hidden items-center group-hover:flex">
+                      <button type="button" title="Analyze" onClick={(e) => (e.stopPropagation(), onAnalyze(row.file.id))} className="rounded-[2px] p-0.5 text-fg-subtle hover:bg-raised hover:text-fg">
+                        <Icon name="play" size={12} />
+                      </button>
+                      <button type="button" title="Delete from disk and index" onClick={(e) => (e.stopPropagation(), onDelete(row.file))} className="rounded-[2px] p-0.5 text-fg-subtle hover:bg-raised hover:text-sev-critical">
+                        <Icon name="trash" size={12} />
+                      </button>
+                    </span>
+                  </div>
+                )
+              )}
             </div>
-          ))
+          </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }

@@ -1,363 +1,446 @@
 "use client";
 
-import { useState, useEffect, useTransition, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
+import { CodeViewport, type FocusRequest } from "@/components/CodeViewport";
+import { IssueTracker, type IssueScope } from "@/components/IssueTracker";
 import { MetricCards } from "@/components/MetricCards";
-import { RepositoryExplorer, FileStreamTable, FileItem as ExplorerFileItem } from "@/components/RepositoryExplorer";
-import { CodeViewport } from "@/components/CodeViewport";
-import { IssueTracker } from "@/components/IssueTracker";
-import { Button } from "@/components/ui";
-import { linkFolderAndRead, commitFix, deleteFileFromDisk, chunkFiles } from "@/lib/fs-desktop";
+import { RepositoryExplorer } from "@/components/RepositoryExplorer";
+import { WorkspaceBar } from "@/components/WorkspaceBar";
+import { Icon, Spinner } from "@/components/ui";
+import { api, ApiClientError, streamBatch, swrFetcher } from "@/lib/api-client";
+import type {
+  AnalysisResultDto,
+  CommitResultDto,
+  FileDetailDto,
+  FileSummaryDto,
+  IssueDto,
+  ManifestResultDto,
+  StatsDto,
+  SyncResultDto,
+  SystemDto,
+  WorkspaceDto,
+} from "@/lib/contracts";
+import {
+  batchBySize,
+  browserFsSupported,
+  deleteFileViaHandle,
+  forgetHandle,
+  loadHandle,
+  pickDirectory,
+  saveHandle,
+  walkDirectoryHandle,
+  writeFileViaHandle,
+} from "@/lib/fs-browser";
+import { cn, formatInt, formatMs } from "@/lib/utils";
 
-const fetcher = (url: string) => fetch(url).then((r) => {
-  if (!r.ok) throw new Error(`Fetch failed ${r.status}`);
-  return r.json();
-});
-
-interface FileListItem extends ExplorerFileItem {
-  content: string;
-  correctedContent?: string | null;
-  extension: string;
-  qualityScore?: number | null;
-  errorMessage?: string | null;
-  criticalCount?: number;
-  issuesCount?: number;
+interface Activity {
+  label: string;
+  done: number;
+  total: number | null;
+  detail?: string;
 }
 
-interface DetailedFile {
-  id: number;
-  path: string;
-  content: string;
-  correctedContent?: string | null;
-  language: string;
-  status: string;
-  fileSize: number;
-  lineCount: number;
-  qualityScore?: number | null;
-  errorMessage?: string | null;
-  issues: Array<{ id: number; line: number; severity: string; message: string; source: string; ruleId?: string }>;
-  history?: any[];
+interface Notice {
+  tone: "error" | "info";
+  text: string;
+  code?: string;
 }
 
-export default function Dashboard() {
-  const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
-  const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
-  const [isPending, startTransition] = useTransition();
-  const [linking, setLinking] = useState(false);
-  const [linkProgress, setLinkProgress] = useState<{ scanned: number; currentPath: string } | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filter, setFilter] = useState("all");
+const WS_KEY = "aetherops.workspace";
+
+function readStoredWorkspace(): number | null {
+  try {
+    const v = Number(window.localStorage.getItem(WS_KEY));
+    return Number.isInteger(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function describeError(err: unknown): Notice {
+  if (err instanceof ApiClientError) return { tone: "error", text: err.message, code: err.code };
+  if (err instanceof DOMException && err.name === "AbortError") return { tone: "info", text: "Cancelled." };
+  return { tone: "error", text: err instanceof Error ? err.message : String(err) };
+}
+
+export default function CommandCenter() {
+  const [chosenWs, setChosenWs] = useState<number | null>(() => (typeof window === "undefined" ? null : readStoredWorkspace()));
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [focus, setFocus] = useState<FocusRequest | null>(null);
+  const [activeIssueId, setActiveIssueId] = useState<number | null>(null);
+  const [issueScope, setIssueScope] = useState<IssueScope>("file");
+  const [activity, setActivity] = useState<Activity | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [analyzingId, setAnalyzingId] = useState<number | null>(null);
   const [committing, setCommitting] = useState(false);
-  const [reanalyzing, setReanalyzing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "active">("idle");
-  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [overlay, setOverlay] = useState<"explorer" | "issues" | null>(null);
+  const [browserSupported] = useState(() => typeof window !== "undefined" && browserFsSupported());
+  const handles = useRef(new Map<number, FileSystemDirectoryHandle>());
+  const autoAnalyzed = useRef(new Set<string>());
 
-  const { data: filesData, error: filesError, isLoading: filesLoading, mutate: mutateFiles } = useSWR(
-    "/api/files",
-    fetcher,
-    {
-      refreshInterval: 5000,
-      revalidateOnFocus: false,
-      dedupingInterval: 2000,
-    }
-  );
+  // ------------------------------------------------------------------ data
+  const { data: system, mutate: mutateSystem } = useSWR<SystemDto>("/api/system", swrFetcher, { refreshInterval: 15_000 });
+  const ready = system?.db.migrated === true;
+  const { data: workspaces, mutate: mutateWorkspaces } = useSWR<WorkspaceDto[]>(ready ? "/api/workspaces" : null, swrFetcher);
+  const active = useMemo(() => workspaces?.find((w) => w.id === chosenWs) ?? workspaces?.[0], [workspaces, chosenWs]);
+  const wsId = active?.id ?? null;
+  const busy = activity !== null;
 
-  const { data: statsData, isLoading: statsLoading, mutate: mutateStats } = useSWR("/api/stats", fetcher, {
-    refreshInterval: 5000,
-    revalidateOnFocus: false,
+  const { data: files, isLoading: filesLoading, mutate: mutateFiles } = useSWR<FileSummaryDto[]>(wsId ? `/api/files?workspaceId=${wsId}` : null, swrFetcher, {
+    refreshInterval: (data) => (busy || data?.some((f) => f.status === "analyzing") ? 1500 : 10_000),
+    keepPreviousData: true,
   });
-
-  const { data: detailedData, isLoading: detailedLoading, mutate: mutateDetailed } = useSWR(
-    selectedFileId ? `/api/files?id=${selectedFileId}` : null,
-    fetcher,
-    { revalidateOnFocus: false }
+  const { data: stats, isLoading: statsLoading, mutate: mutateStats } = useSWR<StatsDto>(wsId ? `/api/stats?workspaceId=${wsId}` : null, swrFetcher, {
+    refreshInterval: busy ? 2000 : 10_000,
+    keepPreviousData: true,
+  });
+  const { data: detail, isLoading: detailLoading, mutate: mutateDetail } = useSWR<FileDetailDto>(selectedId ? `/api/files/${selectedId}` : null, swrFetcher, {
+    refreshInterval: (d) => (d?.status === "analyzing" ? 1500 : 0),
+  });
+  const { data: wsIssues, isLoading: wsIssuesLoading, mutate: mutateWsIssues } = useSWR<IssueDto[]>(
+    wsId && issueScope === "workspace" ? `/api/issues?workspaceId=${wsId}&status=all&limit=1000` : null,
+    swrFetcher
   );
 
-  const files: FileListItem[] = filesData?.files || [];
-  const detailedFile: DetailedFile | null = detailedData?.file || null;
-  const selectedFile = useMemo(() => files.find((f) => f.id === selectedFileId) || null, [files, selectedFileId]);
+  const refreshAll = useCallback(async () => {
+    await Promise.all([mutateFiles(), mutateStats(), mutateWorkspaces(), issueScope === "workspace" ? mutateWsIssues() : undefined]);
+  }, [mutateFiles, mutateStats, mutateWorkspaces, mutateWsIssues, issueScope]);
 
-  useEffect(() => {
-    if (!detailedFile) return;
-    if (detailedFile.status === "pending") {
-      handleAnalyze(detailedFile.id, false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailedFile?.id, detailedFile?.status]);
-
-  const handleLinkFolder = async () => {
-    setLinking(true);
-    setSyncStatus("syncing");
-    setErrorBanner(null);
-    setLinkProgress({ scanned: 0, currentPath: "" });
+  const selectWorkspace = (id: number) => {
+    setChosenWs(id);
+    setSelectedId(null);
+    setFocus(null);
     try {
-      const { dirHandle: handle, files: localFiles } = await linkFolderAndRead((p) => {
-        setLinkProgress({ scanned: p.scanned, currentPath: p.currentPath });
-      });
+      window.localStorage.setItem(WS_KEY, String(id));
+    } catch {
+      // storage unavailable (private mode): selection simply is not remembered
+    }
+  };
 
-      setDirHandle(handle);
+  // ------------------------------------------------------------------ handles (browser mode)
+  const getHandle = useCallback(async (ws: WorkspaceDto): Promise<FileSystemDirectoryHandle> => {
+    const cached = handles.current.get(ws.id) ?? (await loadHandle(ws.id));
+    if (!cached) throw new Error(`The browser no longer holds a handle for "${ws.name}". Use Link workspace → Choose folder to reconnect it.`);
+    handles.current.set(ws.id, cached);
+    return cached;
+  }, []);
 
-      if (localFiles.length === 0) {
-        setErrorBanner("Folder is empty or all files ignored (node_modules, .git etc are skipped).");
-        setSyncStatus("idle");
-        setLinking(false);
-        return;
-      }
-
-      const chunks = chunkFiles(localFiles, 20);
-      let totalSynced = 0;
-
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        setLinkProgress({ scanned: totalSynced, currentPath: `Syncing batch ${i + 1}/${chunks.length} (${chunk.length} files)` });
-        const res = await fetch("/api/files", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            files: chunk.map((f) => ({
-              path: f.path,
-              content: f.content,
-              language: f.language,
-              extension: f.extension,
-              fileSize: f.size,
-            })),
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(`Sync batch ${i + 1} failed: ${err}`);
+  // ------------------------------------------------------------------ sync
+  const syncWorkspace = useCallback(
+    async (ws: WorkspaceDto) => {
+      setNotice(null);
+      try {
+        if (ws.kind === "server") {
+          setActivity({ label: "Syncing", done: 0, total: null, detail: ws.rootPath });
+          const r = await api<SyncResultDto>(`/api/workspaces/${ws.id}/sync`, { method: "POST", json: {}, timeoutMs: 300_000 });
+          setNotice({
+            tone: "info",
+            text: `Synced ${formatInt(r.added + r.updated + r.unchanged)} files in ${formatMs(r.durationMs)}: +${r.added} new, ${r.updated} changed, ${r.removed} removed, ${r.unchanged} unchanged · ${r.findings} deterministic findings${r.truncated ? " · file limit reached" : ""}`,
+          });
+        } else {
+          const handle = await getHandle(ws);
+          setActivity({ label: "Reading", done: 0, total: null, detail: handle.name });
+          const walk = await walkDirectoryHandle(handle, (p) => setActivity({ label: "Reading", done: p.discovered, total: null, detail: p.currentPath }));
+          const manifest = await api<ManifestResultDto>(`/api/workspaces/${ws.id}/sync`, {
+            method: "POST",
+            json: { entries: walk.files.map((f) => ({ path: f.path, hash: f.hash })) },
+            timeoutMs: 120_000,
+          });
+          const needed = new Set(manifest.needed);
+          const batches = batchBySize(walk.files.filter((f) => needed.has(f.path)));
+          let uploaded = 0;
+          for (const batch of batches) {
+            setActivity({ label: "Uploading", done: uploaded, total: needed.size, detail: batch[0]?.path });
+            await api(`/api/files`, { method: "POST", json: { workspaceId: ws.id, files: batch.map((f) => ({ path: f.path, content: f.content, hash: f.hash })) }, timeoutMs: 120_000 });
+            uploaded += batch.length;
+          }
+          setNotice({ tone: "info", text: `Synced ${formatInt(walk.files.length)} files: ${needed.size} uploaded, ${manifest.unchanged} unchanged, ${manifest.removed} removed, ${walk.skipped} skipped by policy` });
         }
-        const json = await res.json();
-        totalSynced += json.synced || chunk.length;
+      } catch (err) {
+        setNotice(describeError(err));
+      } finally {
+        setActivity(null);
+        await refreshAll();
       }
+    },
+    [getHandle, refreshAll]
+  );
 
-      await mutateFiles();
-      await mutateStats();
-      setSyncStatus("active");
-    } catch (e: any) {
-      console.error(e);
-      if (e?.message?.includes("File System Access API")) {
-        setErrorBanner("Your browser doesn't support File System Access API. Use Chrome/Edge 86+.");
-      } else if (e?.name === "AbortError") {
-        setErrorBanner("Folder linking cancelled.");
-        setSyncStatus("idle");
-      } else {
-        setErrorBanner(e?.message || "Failed to link folder");
-        setSyncStatus("idle");
-      }
-    } finally {
-      setLinking(false);
-      setLinkProgress(null);
-    }
-  };
-
-  const handleSelectFile = (f: { id: number; path: string }) => {
-    startTransition(() => {
-      setSelectedFileId(f.id);
-    });
-  };
-
-  const handleAnalyze = async (fileId: number, _fastOnly = false) => {
-    setReanalyzing(true);
-    setErrorBanner(null);
+  const linkServer = async (rootPath: string): Promise<boolean> => {
     try {
-      const r = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId, fastOnly: _fastOnly }),
-      });
-      const json = await r.json().catch(() => ({}));
-      await mutateFiles();
-      await mutateDetailed();
-      await mutateStats();
-      if (json?.error && json?.status === "error") {
-        console.warn("Analyze returned error status", json.error);
-      }
-    } catch (e: any) {
-      setErrorBanner(`Analyze failed: ${e?.message}`);
-    } finally {
-      setReanalyzing(false);
+      const ws = await api<WorkspaceDto>("/api/workspaces", { method: "POST", json: { kind: "server", rootPath } });
+      await mutateWorkspaces();
+      selectWorkspace(ws.id);
+      await syncWorkspace(ws);
+      return true;
+    } catch (err) {
+      setNotice(describeError(err));
+      return false;
     }
   };
 
-  const handleCommitFix = async () => {
-    if (!detailedFile?.correctedContent) {
-      setErrorBanner("No corrected code available to commit");
-      return;
+  const linkBrowser = async () => {
+    try {
+      const handle = await pickDirectory();
+      const ws = await api<WorkspaceDto>("/api/workspaces", { method: "POST", json: { kind: "browser", name: handle.name } });
+      handles.current.set(ws.id, handle);
+      await saveHandle(ws.id, handle);
+      await mutateWorkspaces();
+      selectWorkspace(ws.id);
+      await syncWorkspace(ws);
+    } catch (err) {
+      setNotice(describeError(err));
     }
-    if (!dirHandle) {
-      setErrorBanner("RECONNECT_FOLDER: No directory handle active. Please click 'Link Folder' again to reconnect your AetherOps_Watch folder. The FileSystemWritableFileStream direct-write requires an active handle (per §4.5).");
-      return;
-    }
+  };
 
+  const unlink = async () => {
+    if (!active || !window.confirm(`Unlink "${active.name}"? Stored analysis is removed; files on disk are not touched.`)) return;
+    try {
+      await api(`/api/workspaces/${active.id}`, { method: "DELETE" });
+      await forgetHandle(active.id);
+      handles.current.delete(active.id);
+      setSelectedId(null);
+      setChosenWs(null);
+      await mutateWorkspaces();
+    } catch (err) {
+      setNotice(describeError(err));
+    }
+  };
+
+  // ------------------------------------------------------------------ analysis
+  const analyze = useCallback(
+    async (fileId: number) => {
+      setAnalyzingId(fileId);
+      try {
+        const res = await api<AnalysisResultDto>("/api/analyze", { method: "POST", json: { fileId, engine: "hybrid" }, timeoutMs: 300_000 });
+        if (fileId === selectedId) await mutateDetail(res.file, { revalidate: false });
+        if (res.aiError) setNotice({ tone: "error", text: res.aiError, code: "AI_DEGRADED" });
+      } catch (err) {
+        if (!(err instanceof ApiClientError && err.code === "ANALYSIS_IN_PROGRESS")) setNotice(describeError(err));
+      } finally {
+        setAnalyzingId(null);
+        await Promise.all([mutateFiles(), mutateStats(), fileId === selectedId ? mutateDetail() : undefined]);
+      }
+    },
+    [selectedId, mutateDetail, mutateFiles, mutateStats]
+  );
+
+  // Selecting a file whose current content has not been AI-verified triggers one deep analysis.
+  const aiConfigured = system?.ai.configured ?? false;
+  useEffect(() => {
+    if (!detail || !aiConfigured || detail.engine === "hybrid" || detail.status === "analyzing") return;
+    const key = `${detail.id}:${detail.contentHash}`;
+    if (autoAnalyzed.current.has(key)) return;
+    autoAnalyzed.current.add(key);
+    queueMicrotask(() => void analyze(detail.id));
+  }, [detail, aiConfigured, analyze]);
+
+  const runScan = async (engine: "heuristic" | "hybrid") => {
+    if (!active) return;
+    if (engine === "hybrid" && !window.confirm("Deep scan sends every file that is not yet AI-verified to the configured AI provider. Continue?")) return;
+    setNotice(null);
+    setActivity({ label: engine === "hybrid" ? "Deep scan" : "Scan", done: 0, total: null });
+    try {
+      await streamBatch({ workspaceId: active.id, scope: "changed", engine }, (e) => {
+        if (e.type === "start") setActivity({ label: engine === "hybrid" ? "Deep scan" : "Scan", done: 0, total: e.total, detail: `${e.skipped} up to date` });
+        else if (e.type === "file") setActivity((a) => ({ label: a?.label ?? "Scan", done: (a?.done ?? 0) + 1, total: e.total, detail: e.path }));
+        else if (e.type === "done")
+          setNotice({
+            tone: e.scan.status === "completed" ? "info" : "error",
+            text: `${e.scan.kind} scan ${e.scan.status}: ${e.scan.filesScanned}/${e.scan.filesTotal} files, ${e.scan.issuesFound} open issues, ${formatMs(e.scan.durationMs)}${e.scan.error ? ` · first error: ${e.scan.error}` : ""}`,
+          });
+        else if (e.type === "error") setNotice({ tone: "error", text: e.error.message, code: e.error.code });
+      });
+    } catch (err) {
+      setNotice(describeError(err));
+    } finally {
+      setActivity(null);
+      await refreshAll();
+      if (selectedId) await mutateDetail();
+    }
+  };
+
+  // ------------------------------------------------------------------ commit & delete
+  const commit = async ({ git }: { git: boolean }) => {
+    if (!detail?.correctedContent || !active) return;
     setCommitting(true);
-    setErrorBanner(null);
+    setNotice(null);
     try {
-      await commitFix(dirHandle, detailedFile.path, detailedFile.correctedContent);
-
-      const res = await fetch("/api/commit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId: detailedFile.id, newContent: detailedFile.correctedContent }),
-      });
-      if (!res.ok) throw new Error("DB commit update failed");
-
-      await mutateFiles();
-      await mutateDetailed();
-      await mutateStats();
-
-      await handleAnalyze(detailedFile.id, false);
-    } catch (e: any) {
-      if (e?.message?.includes("RECONNECT_FOLDER")) {
-        setErrorBanner(e.message.replace("RECONNECT_FOLDER: ", ""));
-      } else {
-        setErrorBanner(`Commit failed: ${e?.message}`);
+      let writtenHash: string | undefined;
+      if (active.kind === "browser") {
+        writtenHash = await writeFileViaHandle(await getHandle(active), detail.path, detail.correctedContent, detail.contentHash);
       }
+      const res = await api<CommitResultDto>("/api/commit", { method: "POST", json: { fileId: detail.id, baseHash: detail.contentHash, writtenHash, git }, timeoutMs: 90_000 });
+      await mutateDetail(res.file, { revalidate: false });
+      setNotice({
+        tone: res.gitError ? "error" : "info",
+        text: `Patch written to ${detail.path} (sha256 ${res.newHash.slice(0, 10)}) · ${res.issuesFixed} issue(s) marked fixed${res.gitSha ? ` · git ${res.gitSha.slice(0, 8)}` : ""}${res.gitError ? ` · git commit failed: ${res.gitError}` : ""}`,
+      });
+    } catch (err) {
+      setNotice(describeError(err));
     } finally {
       setCommitting(false);
+      await refreshAll();
     }
   };
 
-  const handleDelete = async (f: ExplorerFileItem) => {
-    const confirmed = confirm(`Delete ${f.path} from both disk and database? This cannot be undone.`);
-    if (!confirmed) return;
-    setErrorBanner(null);
+  const deleteFile = async (file: FileSummaryDto) => {
+    if (!active || !window.confirm(`Delete ${file.path} from disk and from the index? This cannot be undone.`)) return;
     try {
-      if (dirHandle) {
-        try {
-          await deleteFileFromDisk(dirHandle, f.path);
-        } catch (e: any) {
-          if (e?.message?.includes("RECONNECT_FOLDER")) {
-            setErrorBanner("Cannot delete from disk: folder not linked. Will delete from DB only, please reconnect to delete from disk.");
-          } else {
-            console.warn("Disk delete failed, continuing with DB delete", e);
-          }
-        }
-      }
-      await fetch(`/api/files/${f.id}`, { method: "DELETE" });
-      if (selectedFileId === f.id) setSelectedFileId(null);
-      await mutateFiles();
-      await mutateStats();
-    } catch (e: any) {
-      setErrorBanner(`Delete failed: ${e?.message}`);
+      if (active.kind === "browser") await deleteFileViaHandle(await getHandle(active), file.path);
+      await api(`/api/files/${file.id}?disk=1`, { method: "DELETE" });
+      if (selectedId === file.id) setSelectedId(null);
+    } catch (err) {
+      setNotice(describeError(err));
+    } finally {
+      await refreshAll();
     }
   };
+
+  // ------------------------------------------------------------------ navigation
+  const selectFile = (id: number) => {
+    setSelectedId(id);
+    setFocus(null);
+    setActiveIssueId(null);
+    setOverlay(null);
+  };
+
+  const jumpToIssue = (issue: IssueDto) => {
+    if (issue.fileId !== selectedId) setSelectedId(issue.fileId);
+    setActiveIssueId((cur) => (cur === issue.id ? null : issue.id));
+    setFocus({ line: issue.line, nonce: Date.now() });
+    setOverlay(null);
+  };
+
+  // ------------------------------------------------------------------ render
+  const setupMessage = !system
+    ? null
+    : !system.db.configured
+      ? "DATABASE_URL is not set. Add a postgres:// URL (or pglite:./.data/pglite for the embedded local database) to .env and restart."
+      : !system.db.connected
+        ? `Database unreachable: ${system.db.error ?? "unknown error"}`
+        : !system.db.migrated
+          ? "Database schema is not migrated. Run `npm run db:migrate`, then reload."
+          : null;
+
+  const progressPct = activity?.total ? Math.min(100, (activity.done / Math.max(1, activity.total)) * 100) : null;
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-[#050a09] text-[#d6ffe8] overflow-hidden">
-      <header className="h-14 flex items-center justify-between px-4 border-b border-[#1a2e25] bg-[#0a1210] shrink-0">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-[#00ff88] animate-pulse-green inline-block" />
-            <span className="text-sm font-bold tracking-widest font-mono">AETHEROPS</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00ff88]/10 text-[#00ff88] border border-[#00ff88]/20 tracking-widest">SRE WATCHDOG ACTIVE</span>
+    <div className="grid h-dvh grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_auto_minmax(0,1fr)_24px] overflow-hidden bg-canvas">
+      <WorkspaceBar
+        system={system}
+        workspaces={workspaces}
+        active={active}
+        busy={busy}
+        browserSupported={browserSupported}
+        onSelect={selectWorkspace}
+        onLinkServer={linkServer}
+        onLinkBrowser={linkBrowser}
+        onSync={() => active && syncWorkspace(active)}
+        onScan={runScan}
+        onUnlink={unlink}
+        onTogglePane={(p) => setOverlay((o) => (o === p ? null : p))}
+      />
+
+      <MetricCards stats={stats} system={system} loading={statsLoading} />
+
+      <div>
+        {activity && (
+          <div className="relative h-[2px] overflow-hidden bg-line">
+            {progressPct === null ? <div className="progress-indeterminate absolute inset-0" /> : <div className="h-full bg-accent transition-[width]" style={{ width: `${progressPct}%` }} />}
           </div>
-          <div className="hidden md:flex items-center gap-2 text-xs font-mono text-[#4a6a5a]">
-            <span>Live File Sync</span>
-            <span className="w-1 h-1 rounded-full bg-[#4a6a5a]" />
-            <span>{files.length} files tracked</span>
+        )}
+        {(setupMessage || notice) && (
+          <div
+            role={setupMessage || notice?.tone === "error" ? "alert" : "status"}
+            className={cn(
+              "flex items-start gap-2 border-b border-line px-3 py-1.5 text-[12px]",
+              setupMessage || notice?.tone === "error" ? "bg-sev-critical/[0.07] text-[#f4a3a6]" : "bg-accent/[0.06] text-fg-muted"
+            )}
+          >
+            <Icon name={setupMessage || notice?.tone === "error" ? "alert" : "database"} size={13} className="mt-0.5" />
+            <span className="min-w-0 flex-1">
+              {(notice?.code || setupMessage) && <span className="mr-2 font-mono text-[10.5px] opacity-80">{setupMessage ? "SETUP" : notice?.code}</span>}
+              {setupMessage ?? notice?.text}
+            </span>
+            {!setupMessage && (
+              <button type="button" onClick={() => setNotice(null)} className="text-current opacity-70 hover:opacity-100" aria-label="Dismiss">
+                <Icon name="close" size={12} />
+              </button>
+            )}
+            {setupMessage && (
+              <button type="button" onClick={() => mutateSystem()} className="font-mono text-[11px] underline-offset-2 hover:underline">
+                recheck
+              </button>
+            )}
           </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <div className="relative mr-2 hidden sm:block">
-            <input
-              placeholder="Search scripts..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="bg-[#0f1613] border border-[#1a2e25] rounded px-3 py-1.5 text-xs font-mono w-48 focus:outline-none focus:border-[#00ff88]/30 placeholder-[#4a6a5a]"
-            />
-          </div>
-          <Button variant={dirHandle ? "outline" : "primary"} size="md" onClick={handleLinkFolder} loading={linking}>
-            {dirHandle ? "↻ Re-Link Folder" : "⧉ Link Folder"}
-          </Button>
-          <div className="w-px h-6 bg-[#1a2e25] mx-1" />
-          <div className="w-7 h-7 rounded-full bg-[#1a2e25] flex items-center justify-center text-xs">V</div>
-        </div>
-      </header>
-
-      {errorBanner && (
-        <div className="bg-[#2e1a1a] border-b border-[#ff3b5c]/30 px-4 py-2 flex items-center justify-between shrink-0">
-          <span className="text-xs font-mono text-[#ff8a8a]">{errorBanner}</span>
-          <button onClick={() => setErrorBanner(null)} className="text-[#ff3b5c] text-xs">✕</button>
-        </div>
-      )}
-
-      {linkProgress && (
-        <div className="bg-[#0a1a12] border-b border-[#00ff88]/20 px-4 py-1.5 flex items-center gap-3 shrink-0">
-          <span className="w-3 h-3 border border-[#00ff88] border-t-transparent rounded-full animate-spin inline-block" />
-          <span className="text-[11px] font-mono text-[#00ff88]">Scanning: {linkProgress.scanned} files • {linkProgress.currentPath}</span>
-        </div>
-      )}
-
-      <div className="p-3 shrink-0">
-        <MetricCards stats={statsData} loading={statsLoading} isSyncActive={!!dirHandle && syncStatus === "active"} />
+        )}
       </div>
 
-      <div className="px-3 pb-3 shrink-0">
-        <FileStreamTable
-          files={files}
-          selectedPath={selectedFile?.path || null}
-          onSelect={(f) => handleSelectFile(f)}
-          onDelete={handleDelete}
-          onReanalyze={(f) => handleAnalyze(f.id)}
-          filter={filter}
-          setFilter={setFilter}
-          search={searchQuery}
-        />
-      </div>
-
-      <div className="flex-1 grid grid-cols-12 gap-3 px-3 pb-3 overflow-hidden min-h-0">
-        <div className="col-span-12 md:col-span-3 lg:col-span-3 bg-[#0f1613] border border-[#1a2e25] rounded flex flex-col overflow-hidden min-h-0">
-          <RepositoryExplorer
-            files={files.filter((f) => f.path.toLowerCase().includes(searchQuery.toLowerCase()))}
-            selectedPath={selectedFile?.path || null}
-            onSelectFile={(f) => handleSelectFile(f)}
-            loading={filesLoading}
-          />
-          {filesError && (
-            <div className="p-3 m-2 bg-[#2e1a1a] border border-[#ff3b5c]/20 rounded">
-              <div className="text-[11px] font-mono text-[#ff3b5c]">Failed to load files</div>
-              <div className="text-[10px] font-mono text-[#ff8a8a] mt-1">{String(filesError)}</div>
-              <Button variant="ghost" size="sm" onClick={() => mutateFiles()} className="mt-2">Retry</Button>
-            </div>
+      <main className="relative grid min-h-0 grid-cols-1 divide-x divide-line md:grid-cols-[248px_minmax(0,1fr)] xl:grid-cols-[272px_minmax(0,1fr)_384px]">
+        <div
+          className={cn(
+            "min-h-0 md:static md:flex md:flex-col",
+            overlay === "explorer" ? "absolute inset-y-0 left-0 z-30 flex w-[min(320px,85vw)] flex-col border-r border-line shadow-2xl" : "hidden"
           )}
-          <div className="p-2 border-t border-[#1a2e25] shrink-0">
-            <div className="text-[9px] font-mono text-[#4a6a5a] tracking-widest">
-              AETHEROPS_WATCH • {dirHandle ? "Linked via File System Access API" : "Not linked - Link folder to enable direct writes"}
-            </div>
-          </div>
+        >
+          <RepositoryExplorer files={files} loading={filesLoading} selectedId={selectedId} onSelect={selectFile} onAnalyze={analyze} onDelete={deleteFile} />
         </div>
 
-        <div className="col-span-12 md:col-span-6 lg:col-span-6 bg-[#0a1210] border border-[#1a2e25] rounded flex flex-col overflow-hidden min-h-[400px] md:min-h-0">
-          <CodeViewport
-            file={detailedFile ? { ...detailedFile, issues: detailedFile.issues || [] } : null}
-            loading={detailedLoading || isPending}
-            onCommit={handleCommitFix}
-            onReanalyze={() => selectedFileId && handleAnalyze(selectedFileId)}
-            committing={committing}
-            reanalyzing={reanalyzing}
-          />
-        </div>
+        <CodeViewport
+          file={detail}
+          loading={detailLoading}
+          focus={focus}
+          aiConfigured={aiConfigured}
+          canGitCommit={active?.kind === "server" && active.isGitRepo}
+          analyzing={analyzingId !== null && analyzingId === selectedId}
+          committing={committing}
+          onAnalyze={() => selectedId && analyze(selectedId)}
+          onCommit={commit}
+        />
 
-        <div className="col-span-12 md:col-span-3 lg:col-span-3 bg-[#0f1613] border border-[#1a2e25] rounded flex flex-col overflow-hidden min-h-0">
+        <div
+          className={cn(
+            "min-h-0 xl:static xl:flex xl:flex-col",
+            overlay === "issues" ? "absolute inset-y-0 right-0 z-30 flex w-[min(400px,92vw)] flex-col border-l border-line shadow-2xl" : "hidden"
+          )}
+        >
           <IssueTracker
-            issues={detailedFile?.issues || []}
-            stats={statsData}
-            loading={statsLoading || detailedLoading}
-            selectedFilePath={selectedFile?.path || null}
-            onIssueClick={(line) => {
-              console.log("Scroll to line", line);
-            }}
+            scope={issueScope}
+            onScopeChange={setIssueScope}
+            fileIssues={detail?.issues ?? []}
+            workspaceIssues={wsIssues}
+            loading={issueScope === "file" ? detailLoading : wsIssuesLoading}
+            activeIssueId={activeIssueId}
+            onJump={jumpToIssue}
+            scans={stats?.recentScans ?? []}
+            hasFile={selectedId !== null}
           />
         </div>
-      </div>
+      </main>
 
-      <div className="h-6 bg-[#0a1210] border-t border-[#1a2e25] flex items-center px-4 text-[10px] font-mono text-[#3a4a44] shrink-0 gap-4">
-        <span>⚡ Turbopack • PostgreSQL via Drizzle ORM (pg driver) • Gemini</span>
-        <span className="hidden md:inline">• No mock data • Real DB + Real FS Access API</span>
-        <span className="ml-auto">Built for demo to recruiters • Vercel serverless-safe</span>
-      </div>
+      <footer className="flex items-center gap-4 border-t border-line bg-surface px-3 font-mono text-[10.5px] text-fg-subtle">
+        {activity ? (
+          <span className="flex min-w-0 items-center gap-2 text-fg-muted">
+            <Spinner className="size-2.5" />
+            <span className="shrink-0">
+              {activity.label} {activity.total !== null ? `${formatInt(activity.done)}/${formatInt(activity.total)}` : formatInt(activity.done) || ""}
+            </span>
+            {activity.detail && <span className="truncate text-fg-subtle">{activity.detail}</span>}
+          </span>
+        ) : (
+          <span>{active ? `${active.kind} workspace · ${formatInt(files?.length ?? 0)} files indexed` : "no workspace linked"}</span>
+        )}
+        <span className="ml-auto hidden shrink-0 sm:inline">
+          {stats ? `${formatInt(stats.openIssues.total)} open · ${formatInt(stats.fixedIssues)} fixed` : ""}
+        </span>
+        {detail && (
+          <span className="hidden shrink-0 md:inline">
+            {detail.language} · {detail.eol.toUpperCase()} · UTF-8
+          </span>
+        )}
+      </footer>
     </div>
   );
 }

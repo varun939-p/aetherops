@@ -1,135 +1,145 @@
-# AetherOps - Real-Time Codebase Analyzer
+# AetherOps
 
-Enterprise-grade, production-ready Real-Time Codebase Analyzer with autonomous AI code-review and auto-remediation pipeline. Portfolio-grade project for live recruiter demo.
+Real-time SRE codebase analysis and remediation workspace. Link a local repository, get deterministic
+security/reliability findings in milliseconds, add AI root-cause analysis with line-range patches, review
+the diff, and write the fix back to disk (optionally as a git commit) — with hashes verified at every step.
 
-![Stack](https://img.shields.io/badge/Next.js-16-black) ![TS](https://img.shields.io/badge/TypeScript-strict-blue) ![Drizzle](https://img.shields.io/badge/Drizzle%20ORM-pg-green) ![Gemini](https://img.shields.io/badge/AI-Gemini%20API-orange)
+## How it works
 
-## Features - All Bugs Fixed Per §5
+| Layer | What it does |
+| --- | --- |
+| **Ingestion** (`src/lib/fs-desktop.ts`, `fs-browser.ts`, `policy.ts`) | Walks a workspace honouring nested `.gitignore` files, skips build/vendor dirs, binaries, non-UTF-8 files, symlinks, and credential files (`.env`, `*.pem`, `id_rsa`, …). Every file gets a SHA-256 so re-syncs only touch changed files. |
+| **Deterministic engine** (`src/lib/heuristic.ts`, `lexer.ts`) | 26 rules over lexed source (never fires inside comments/strings unless the rule inspects literals): injection (`SEC-INJ-*`), secrets, TLS bypass, XSS sinks, unhandled promises, async `forEach`, blocking I/O in async code, HTTP calls without timeouts, N+1 queries, unbounded caches, lazy-init and read-modify-write races, Python name/attribute typos, mutable defaults. Each finding has a rule ID, exact line/column span, severity, category, and a remediation. |
+| **AI engine** (`src/lib/ai.ts`) | Gemini with a JSON response schema, validated again with zod. Files are split into token-budgeted chunks with absolute line numbers; fixes come back as non-overlapping line-range edits, so a patch can never truncate code the model did not see. Exponential backoff with full jitter on 408/429/5xx; falls back to the deterministic engine when no key is configured. |
+| **Persistence** (`src/db/*`, `src/server/*`) | Postgres (or embedded PGlite) via Drizzle. Versioned migrations, workspace-scoped files, issue history (`open` → `fixed`), scans, and commits. Syncs and analyses are transactional; analysis results are only written if the file's hash is unchanged. |
+| **API** (`src/app/api/*`) | Every route returns `{ ok, data, meta, error }` with deterministic status codes. Mutating requests reject cross-origin `Origin`s; filesystem operations only answer on loopback hosts. |
+| **UI** (`src/app/page.tsx`, `src/components/*`) | Full-viewport three-pane workspace: virtualized explorer with fuzzy filter, virtualized source/diff viewport with severity gutter, filterable issue tracker with jump-to-line, and a telemetry strip computed from the database. |
 
-1. **Zero Mock Data** - Every file, issue, and corrected code comes from real folder traversal + real Gemini call persisted in Postgres via Drizzle. No hardcoded dummy files.
+### Filesystem modes
 
-2. **Never reports clean on failure** - API failure sets explicit `error` status with retry option, never falls through to clean.
+- **Server mode (local-first, default for local use).** Set `AETHEROPS_ALLOWED_ROOTS`. The server walks the
+  folder, writes patches atomically (temp file + fsync + rename, then re-read and hash-verify), refuses to
+  write if the file changed on disk since analysis, and can `git commit` exactly the patched file.
+- **Browser mode (fallback for hosted deployments).** Uses the File System Access API (Chrome/Edge). The
+  directory handle is persisted in IndexedDB; the browser hashes, uploads, and writes; the server verifies
+  hashes. No git integration.
 
-3. **AI corrected code shown side-by-side** - Vulnerable source | AI rectified, with issues list sorted critical first.
+## Setup
 
-4. **Re-analyze is non-blocking**
-   - `useTransition` + `useOptimistic` pattern - UI stays responsive with loading skeleton
-   - Auto-triggers when file selected and `auditStatus === pending`
-   - SWR polling with targeted row re-render, not whole page
-   - Debounced explorer updates
-
-5. **Commit Fix actually overwrites local file**
-   - Strict `FileSystemWritableFileStream` direct-write in `lib/fs-desktop.ts`
-   - No download-prompt fallback - shows explicit "reconnect folder" prompt if handle inactive
-   - Atomic write with abort handling
-
-6. **After Commit Fix, Re-analyze shows corrected code** - DB record updated immediately before re-analysis reads newly written content.
-
-7. **Bin deletes from both disk and DB instantly** - Uses `directoryHandle.removeEntry()` + DELETE `/api/files/[id]` + mutateFiles()
-
-8. **Large files / large repos** - 2MB per file cap, 500 files max safety, chunked traversal and chunked sync (20 files per POST to avoid Vercel timeout), streamed parsing.
-
-9. **Any language** - `detectLanguageFromExtension` never crashes, fallback to plaintext highlighting + generic heuristic analysis.
-
-## Tech Stack (locked)
-
-- Next.js 16 App Router Turbopack
-- TypeScript strict
-- Tailwind CSS + PostCSS
-- PostgreSQL via Drizzle ORM (pg driver)
-- Google Gemini API - model/key from `.env` (`GEMINI_API_KEY`, `GEMINI_MODEL`) - never hardcoded
-- Browser File System Access API (showDirectoryPicker, FileSystemFileHandle, FileSystemWritableFileStream) - client-side handle lives in browser, works even when app hosted on Vercel
-- Vercel serverless-safe
-
-## Architecture
-
-**4.1 Folder Linking (client)** `showDirectoryPicker()` -> recursive walk -> read every file's content/path
-
-**4.2 Sync to Database** Each file upserted to Postgres via Drizzle, dashboard reads exclusively from DB
-
-**4.3 AI Analysis (server API)**
-
-- Fast-Scan <50ms: `fastScan()` regex checks -> immediate UI push
-- LLM pass: `analyzeWithAI()` -> tiered prompt per §6.2 -> store issues + corrected code in DB
-
-**4.4 Dashboard 3-pane**
-
-- Left: Repository Explorer folding tree from DB
-- Center: Code Viewport line numbers, language-aware highlighting, smooth scroll 1000+ lines
-- Right: Analytics & Issue Tracker critical bugs, perf, quality score, language composition - live from DB
-
-**4.5 Commit Fix** `commitFix()` uses stored `FileSystemDirectoryHandle` -> `FileSystemWritableFileStream` direct write atomically
-
-**4.6 Bin** Deletes both local folder and DB instantly
-
-## AI Prompt (§6.2 - verbatim inside `buildPrompt`)
-
-```
-"Act as an expert SRE. Perform a tiered analysis: identify critical security and runtime bugs first. Prioritize them at the top of the JSON output so the UI can highlight them instantly."
-"Refactor the code to optimize for execution time; flag memory leaks and unnecessary re-allocations found during the initial pass."
-```
-Requires strict JSON output (line, severity, message, corrected code) - no free-form prose.
-
-## Quick Start
-
-See `SETUP_GUIDE/README.md` for plain-English numbered steps.
+Requirements: Node 20.12+, git (for commits).
 
 ```bash
 npm install
-cp .env.example .env
-# fill DATABASE_URL, GEMINI_API_KEY, GEMINI_MODEL
-npx drizzle-kit push
-npm run dev
+cp .env.example .env        # then edit .env
+npm run db:migrate          # applies drizzle/ migrations to DATABASE_URL
+npm run dev                 # http://localhost:3000
 ```
 
-Open http://localhost:3000 in Chrome/Edge, click Link Folder, select your `AetherOps_Watch` folder.
+Minimum `.env` for fully local, offline use:
 
-## Env Vars
-
-```
-DATABASE_URL=postgresql://...
-GEMINI_API_KEY=...
-GEMINI_MODEL=gemini-1.5-flash
+```env
+DATABASE_URL=pglite:./.data/pglite
+AETHEROPS_ALLOWED_ROOTS=C:\Users\you\Desktop
 ```
 
-## Acceptance Checklist (self-verified)
+Add `GEMINI_API_KEY` and `GEMINI_MODEL` to enable deep analysis and patches.
 
-- [x] No hardcoded/dummy files anywhere
-- [x] Real error always detected, never clean
-- [x] Every analyzed file shows AI-corrected side-by-side
-- [x] Re-analyze non-blocking, auto-triggers, targeted re-render
-- [x] Commit Fix writes via FileSystemWritableFileStream atomically, no download prompt
-- [x] After Commit Fix, Re-analyze shows corrected/clean
-- [x] Bin removes from disk + DB instantly
-- [x] Handles 1000+ line files and 100+ files without Vercel timeout
-- [x] Works on any language without crashing
-- [x] Every async has loading skeleton, UI never freezes
-- [x] UI matches screenshot dark theme with neon green accents
+> **Upgrading an existing database:** migration `0000_drop_legacy` drops the prototype's `files`, `issues`,
+> and `analysis_history` tables (cached file copies and derived analysis only). Re-link your folder afterwards.
 
-## Project Structure
+## Using it
 
+1. **Link workspace** → paste an absolute path inside `AETHEROPS_ALLOWED_ROOTS` (server mode), or **Choose folder…** (browser mode).
+2. The initial sync runs the deterministic engine on every file. **Sync** re-reads disk and only processes changed hashes.
+3. Select a file: if AI is configured and the current content is not AI-verified yet, deep analysis runs automatically.
+4. Click an issue to jump to its line. **Review patch** opens the unified/split diff; **Apply & commit patch** writes it.
+5. **Scan** re-runs the deterministic engine on changed files; **Deep scan** runs AI analysis on every file not yet AI-verified (asks first).
+
+## Scripts
+
+| Script | Purpose |
+| --- | --- |
+| `npm run dev` / `build` / `start` | Next.js |
+| `npm test` | Node test runner: rules, patching, AI orchestration (fake provider), filesystem boundaries, and full DB flows on in-memory PGlite including a real git commit |
+| `npm run typecheck` / `lint` | `tsc --noEmit` / ESLint |
+| `npm run db:generate` / `db:migrate` / `db:check` | Drizzle Kit |
+
+## API
+
+All responses: `{ "ok": boolean, "data": T | null, "meta": { "requestId", "durationMs", ... }, "error": { "code", "message", "details"? } | null }`.
+
+| Method & path | Body / query | Result |
+| --- | --- | --- |
+| `GET /api/system` | — | DB connectivity/migration, AI config, filesystem mode |
+| `GET /api/workspaces` | — | Workspaces with file counts |
+| `POST /api/workspaces` | `{ kind: "server", rootPath }` or `{ kind: "browser", name }` | Created/existing workspace (201) |
+| `DELETE /api/workspaces/{id}` | — | Unlinks (DB only; disk untouched) |
+| `POST /api/workspaces/{id}/sync` | server: `{}` · browser: `{ entries: [{ path, hash }] }` | Delta sync counts · paths whose content is needed |
+| `GET /api/files?workspaceId=` | — | File summaries (no content) with open/critical/high counts |
+| `POST /api/files` | `{ workspaceId, files: [{ path, content, hash }] }` | Browser-mode upload; hashes re-verified server-side |
+| `GET /api/files/{id}` | — | Content, committable patch, issues, recent scans |
+| `DELETE /api/files/{id}?disk=1` | — | Removes from disk (server mode) and index |
+| `POST /api/analyze` | `{ fileId, engine?: "hybrid" \| "heuristic" }` | Analysis result incl. `scanDurationMs`, coverage, `aiError` |
+| `POST /api/analyze` | `{ workspaceId, scope?: "changed" \| "all", engine? }` | NDJSON stream: `start`, `file`…, `done` |
+| `GET /api/issues?workspaceId=` | `fileId`, `status=open\|fixed\|all`, `severity=a,b`, `category=a,b`, `source` | Issues sorted critical first |
+| `GET /api/stats?workspaceId=` | — | Health index, severity/category breakdown, coverage, LOC, scan latency (mean/p95), recent scans |
+| `POST /api/commit` | `{ fileId, baseHash, git?, writtenHash? }` | Writes the stored patch, marks issues fixed, optional git commit |
+
+Error codes: `VALIDATION_FAILED` 400 · `PATH_OUTSIDE_WORKSPACE` 400/403 · `FORBIDDEN_ORIGIN` 403 · `SERVER_FS_DISABLED` 403 · `NOT_FOUND` 404 · `ANALYSIS_IN_PROGRESS` / `STALE_CONTENT` / `DISK_DRIFT` / `PATCH_UNAVAILABLE` / `INTEGRITY_FAILED` 409/422 · `PAYLOAD_TOO_LARGE` 413 · `UNSUPPORTED_MEDIA_TYPE` 415 · `DB_NOT_CONFIGURED` / `DB_UNAVAILABLE` / `SCHEMA_NOT_MIGRATED` 503.
+
+### curl
+
+```bash
+curl -s -X POST http://localhost:3000/api/workspaces -H "Content-Type: application/json" -d '{"kind":"server","rootPath":"C:/Users/you/Desktop/my-repo"}'
+curl -s -X POST http://localhost:3000/api/workspaces/1/sync -H "Content-Type: application/json" -d '{}'
+curl -s -X POST http://localhost:3000/api/analyze -H "Content-Type: application/json" -d '{"workspaceId":1,"scope":"changed","engine":"heuristic"}'
+curl -s "http://localhost:3000/api/issues?workspaceId=1&severity=critical,high"
 ```
-src/
-  db/schema.ts - files, issues, analysis_history
-  db/index.ts - drizzle pg Pool
-  lib/
-    ai.ts - analyzeWithAI(), buildPrompt() with verbatim instructions
-    heuristic.ts - fastScan <50ms
-    fs-desktop.ts - commitFix() atomic FileSystemWritableFileStream
-    db-init.ts - ensureTables() self-healing
-  app/
-    page.tsx - auto-trigger analysis, SWR polling, commit/bin
-    api/
-      files/ - sync + list (chunked safe)
-      files/[id]/ - get/delete
-      analyze/ - heuristic first, then Gemini, error status distinct
-      commit/ - DB update after disk write
-      stats/ - health metrics
-  components/
-    RepositoryExplorer, FileStreamTable, CodeViewport, IssueTracker, MetricCards, ui
-SETUP_GUIDE/
-  README.md - numbered steps
-  WHAT_YOU_STILL_NEED_TO_DO.md
+
+### JavaScript
+
+```js
+async function call(path, body) {
+  const res = await fetch(`http://localhost:3000${path}`, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined);
+  const env = await res.json();
+  if (!env.ok) throw new Error(`${env.error.code}: ${env.error.message}`);
+  return env.data;
+}
+
+const file = (await call("/api/files?workspaceId=1")).find((f) => f.criticalIssues > 0);
+const { file: detail } = await call("/api/analyze", { fileId: file.id, engine: "hybrid" });
+if (detail.patchCommittable) await call("/api/commit", { fileId: detail.id, baseHash: detail.contentHash, git: true });
 ```
 
-Built for live demo to recruiters, deployable to Vercel, zero mock data, production-ready.
+### Python
+
+```python
+import requests
+
+BASE = "http://localhost:3000"
+
+def call(path, body=None):
+    r = requests.post(BASE + path, json=body, timeout=120) if body is not None else requests.get(BASE + path, timeout=30)
+    env = r.json()
+    if not env["ok"]:
+        raise RuntimeError(f'{env["error"]["code"]}: {env["error"]["message"]}')
+    return env["data"]
+
+stats = call("/api/stats?workspaceId=1")
+print(stats["healthIndex"], stats["openIssues"]["bySeverity"])
+
+# Stream a batch scan
+with requests.post(BASE + "/api/analyze", json={"workspaceId": 1, "scope": "all", "engine": "heuristic"}, stream=True, timeout=600) as r:
+    for line in r.iter_lines():
+        if line:
+            print(line.decode())
+```
+
+## Security notes
+
+- There is no user authentication. Run it on localhost; filesystem endpoints refuse non-loopback `Host` headers
+  (add names to `AETHEROPS_TRUSTED_HOSTS` only if you put an authenticating proxy in front).
+- Hosted deployments (e.g. Vercel) automatically disable server filesystem access. Anyone who can reach a hosted
+  instance can read stored file contents; do not expose one publicly without adding authentication.
+- Credential files are never ingested, stored, or sent to the AI provider. Secrets found inside regular source
+  files are reported (masked) but the file content is still analyzed.

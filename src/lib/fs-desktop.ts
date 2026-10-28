@@ -1,288 +1,306 @@
-"use client";
+import path from "node:path";
+import { promises as fs, type Dirent } from "node:fs";
+import { randomBytes } from "node:crypto";
+import ignore, { type Ignore } from "ignore";
+import { AppError } from "./errors";
+import { describeFile, type IngestedFile } from "./ingest";
+import {
+  MAX_FILE_BYTES,
+  MAX_FILES,
+  isBinaryExtension,
+  isSensitiveFile,
+  looksBinary,
+  normalizeRelativePath,
+  shouldSkipDirectory,
+} from "./policy";
+import { sha256Hex } from "./text";
 
-// Client-side only - uses File System Access API
-// This lets Vercel-hosted app write to user's real local folder via browser.
+/**
+ * Server-side desktop ingestion (local-first mode). Every path that reaches the filesystem is
+ * resolved against an allow-listed workspace root and re-checked after symlink resolution, so
+ * no API input can read or write outside it.
+ */
 
-export interface LocalFileEntry {
-  path: string;
-  content: string;
-  size: number;
-  extension: string;
-  language: string;
+const isWindows = process.platform === "win32";
+const samePathCase = (p: string) => (isWindows ? p.toLowerCase() : p);
+
+export interface ServerFsStatus {
+  enabled: boolean;
+  reason: string | null;
+  allowedRoots: string[];
 }
 
-export interface TraverseProgress {
-  scanned: number;
-  totalEstimated?: number;
-  currentPath: string;
-}
-
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  "dist",
-  "build",
-  ".turbo",
-  ".vercel",
-  ".cache",
-  "__pycache__",
-  "coverage",
-  ".venv",
-  "venv",
-  ".idea",
-  ".vscode",
-  "out",
-]);
-
-const IGNORED_FILES = new Set([".DS_Store", "Thumbs.db"]);
-
-const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB per file cap to avoid OOM
-const MAX_TOTAL_FILES = 500; // Safety limit for large repos
-
-function getExtension(fileName: string): string {
-  const parts = fileName.split(".");
-  return parts.length > 1 ? parts.pop()!.toLowerCase() : "";
-}
-
-function detectLanguage(ext: string): string {
-  const map: Record<string, string> = {
-    js: "javascript",
-    jsx: "javascript",
-    ts: "typescript",
-    tsx: "typescript",
-    py: "python",
-    go: "go",
-    java: "java",
-    rb: "ruby",
-    php: "php",
-    rs: "rust",
-    c: "c",
-    cpp: "cpp",
-    h: "c",
-    cs: "csharp",
-    sh: "bash",
-    json: "json",
-    md: "markdown",
-    yml: "yaml",
-    yaml: "yaml",
-    css: "css",
-    html: "html",
-    sql: "sql",
-    swift: "swift",
-    kt: "kotlin",
-    dart: "dart",
-    vue: "vue",
-    svelte: "svelte",
-  };
-  return map[ext] || "plaintext";
-}
-
-function isBinaryContent(content: string): boolean {
-  // Heuristic: if file contains null byte or >10% non-printable, treat as binary
-  if (content.includes("\0")) return true;
-  return false;
-}
-
-export async function linkFolderAndRead(
-  onProgress?: (p: TraverseProgress) => void
-): Promise<{ dirHandle: FileSystemDirectoryHandle; files: LocalFileEntry[] }> {
-  if (!("showDirectoryPicker" in window)) {
-    throw new Error("File System Access API not supported. Please use Chrome or Edge 86+.");
+export function serverFsStatus(): ServerFsStatus {
+  if (process.env.VERCEL) {
+    return { enabled: false, reason: "Server filesystem access is disabled on hosted deployments; use the browser folder picker.", allowedRoots: [] };
   }
-
-  const dirHandle = await (window as any).showDirectoryPicker({ mode: "readwrite" });
-  const files: LocalFileEntry[] = [];
-  let scanned = 0;
-
-  async function walk(
-    handle: FileSystemDirectoryHandle,
-    relativePath: string
-  ): Promise<void> {
-    if (files.length >= MAX_TOTAL_FILES) return;
-
-    // @ts-ignore - FileSystemDirectoryHandle async iterator
-    for await (const entry of handle.values()) {
-      if (files.length >= MAX_TOTAL_FILES) break;
-
-      const entryPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-
-      if (entry.kind === "directory") {
-        if (IGNORED_DIRS.has(entry.name)) continue;
-        if (entry.name.startsWith(".")) continue; // skip hidden dirs
-        await walk(entry as FileSystemDirectoryHandle, entryPath);
-      } else if (entry.kind === "file") {
-        if (IGNORED_FILES.has(entry.name)) continue;
-        scanned++;
-        onProgress?.({ scanned, currentPath: entryPath });
-
-        try {
-          const file = await (entry as FileSystemFileHandle).getFile();
-          if (file.size > MAX_FILE_SIZE) {
-            console.warn(`Skipping large file ${entryPath} (${file.size} bytes)`);
-            continue;
-          }
-          if (file.size === 0) {
-            files.push({
-              path: entryPath,
-              content: "",
-              size: 0,
-              extension: getExtension(entry.name),
-              language: detectLanguage(getExtension(entry.name)),
-            });
-            continue;
-          }
-
-          const content = await file.text();
-          if (isBinaryContent(content.slice(0, 1000))) {
-            console.warn(`Skipping binary file ${entryPath}`);
-            continue;
-          }
-
-          const ext = getExtension(entry.name);
-          files.push({
-            path: entryPath,
-            content,
-            size: file.size,
-            extension: ext,
-            language: detectLanguage(ext),
-          });
-        } catch (e) {
-          console.warn(`Failed to read ${entryPath}`, e);
-        }
-      }
-    }
+  const roots = (process.env.AETHEROPS_ALLOWED_ROOTS ?? "")
+    .split(path.delimiter)
+    .map((r) => r.trim())
+    .filter(Boolean)
+    .map((r) => path.resolve(r));
+  if (roots.length === 0) {
+    return { enabled: false, reason: "Set AETHEROPS_ALLOWED_ROOTS in .env to the directories this server may read and write.", allowedRoots: [] };
   }
-
-  await walk(dirHandle, "");
-  return { dirHandle, files };
+  return { enabled: true, reason: null, allowedRoots: roots };
 }
 
-export async function getFileHandleFromPath(
-  dirHandle: FileSystemDirectoryHandle,
-  filePath: string
-): Promise<FileSystemFileHandle> {
-  const parts = filePath.split("/").filter(Boolean);
-  const fileName = parts.pop()!;
-  let current: FileSystemDirectoryHandle = dirHandle;
-
-  for (const part of parts) {
-    current = await current.getDirectoryHandle(part);
-  }
-  const fileHandle = await current.getFileHandle(fileName);
-  return fileHandle;
+export function isWithin(root: string, candidate: string): boolean {
+  const rel = path.relative(samePathCase(root), samePathCase(candidate));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-export async function getDirHandleFromPath(
-  dirHandle: FileSystemDirectoryHandle,
-  dirPath: string
-): Promise<FileSystemDirectoryHandle> {
-  if (!dirPath) return dirHandle;
-  const parts = dirPath.split("/").filter(Boolean);
-  let current = dirHandle;
-  for (const part of parts) {
-    current = await current.getDirectoryHandle(part);
+function assertEnabled(): ServerFsStatus {
+  const status = serverFsStatus();
+  if (!status.enabled) throw new AppError(403, "SERVER_FS_DISABLED", status.reason ?? "Server filesystem access is disabled");
+  return status;
+}
+
+/** Validates a user-supplied workspace root: absolute, existing directory, inside an allowed root. */
+export async function resolveWorkspaceRoot(input: string): Promise<string> {
+  const status = assertEnabled();
+  if (!path.isAbsolute(input)) throw new AppError(400, "VALIDATION_FAILED", "Workspace path must be absolute");
+  let real: string;
+  try {
+    real = await fs.realpath(path.resolve(input));
+  } catch {
+    throw new AppError(404, "NOT_FOUND", `Directory not found: ${input}`);
   }
-  return current;
+  const stat = await fs.stat(real);
+  if (!stat.isDirectory()) throw new AppError(400, "VALIDATION_FAILED", "Workspace path is not a directory");
+  const allowedReal = await Promise.all(status.allowedRoots.map((r) => fs.realpath(r).catch(() => r)));
+  if (!allowedReal.some((root) => isWithin(root, real))) {
+    throw new AppError(403, "PATH_OUTSIDE_WORKSPACE", "Directory is outside AETHEROPS_ALLOWED_ROOTS");
+  }
+  return real;
 }
 
 /**
- * Strict atomic direct-write path per §4.5
- * - No download fallback
- * - If handle not active, throw with explicit message to reconnect folder
+ * Resolves a workspace-relative path to an absolute one, rejecting traversal both lexically and
+ * after resolving symlinks on the deepest existing ancestor.
  */
-export async function commitFix(
-  dirHandle: FileSystemDirectoryHandle | null | undefined,
-  filePath: string,
-  newContent: string
-): Promise<void> {
-  if (!dirHandle) {
-    throw new Error("RECONNECT_FOLDER: No directory handle active. Please click 'Link Folder' again to reconnect your AetherOps_Watch folder.");
-  }
+export async function resolveInside(root: string, relPath: string): Promise<string> {
+  assertEnabled();
+  const rel = normalizeRelativePath(relPath);
+  if (!rel) throw new AppError(400, "PATH_OUTSIDE_WORKSPACE", `Unsafe path: ${relPath}`);
+  const realRoot = await fs.realpath(root);
+  const target = path.resolve(realRoot, ...rel.split("/"));
+  if (!isWithin(realRoot, target)) throw new AppError(403, "PATH_OUTSIDE_WORKSPACE", `Path escapes workspace: ${relPath}`);
 
-  // Verify permission
-  try {
-    const perm = await (dirHandle as any).queryPermission({ mode: "readwrite" });
-    if (perm !== "granted") {
-      const req = await (dirHandle as any).requestPermission({ mode: "readwrite" });
-      if (req !== "granted") {
-        throw new Error("RECONNECT_FOLDER: Permission denied. Please re-link folder with readwrite access.");
-      }
-    }
-  } catch (e: any) {
-    if (e?.message?.includes("RECONNECT_FOLDER")) throw e;
-    // Some browsers don't support queryPermission for dir, continue
-  }
-
-  let fileHandle: FileSystemFileHandle;
-  try {
-    fileHandle = await getFileHandleFromPath(dirHandle, filePath);
-  } catch (e) {
-    // File might not exist anymore (if deleted), create it
+  let probe = target;
+  for (;;) {
     try {
-      const parts = filePath.split("/").filter(Boolean);
-      const fileName = parts.pop()!;
-      let current = dirHandle;
-      for (const part of parts) {
-        current = await current.getDirectoryHandle(part, { create: true });
+      const real = await fs.realpath(probe);
+      if (!isWithin(realRoot, real)) throw new AppError(403, "PATH_OUTSIDE_WORKSPACE", `Path resolves outside workspace: ${relPath}`);
+      break;
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+  }
+  return target;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Traversal
+// ---------------------------------------------------------------------------------------------
+
+export interface WalkSummary {
+  files: IngestedFile[];
+  skipped: Record<"ignored" | "sensitive" | "binary" | "tooLarge" | "nonUtf8" | "symlink" | "unreadable", number>;
+  truncated: boolean;
+}
+
+interface IgnoreFrame {
+  base: string;
+  matcher: Ignore;
+}
+
+function isIgnored(frames: IgnoreFrame[], rel: string, isDir: boolean): boolean {
+  for (const { base, matcher } of frames) {
+    if (base && !rel.startsWith(base + "/")) continue;
+    const local = base ? rel.slice(base.length + 1) : rel;
+    if (matcher.ignores(isDir ? `${local}/` : local)) return true;
+  }
+  return false;
+}
+
+async function readIgnoreFile(dir: string): Promise<Ignore | null> {
+  try {
+    return ignore().add(await fs.readFile(path.join(dir, ".gitignore"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// ignoreBOM keeps a leading BOM in the decoded string so commits round-trip the exact bytes.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+async function readTextFile(abs: string, rel: string, skipped: WalkSummary["skipped"]): Promise<IngestedFile | null> {
+  try {
+    const stat = await fs.stat(abs);
+    if (stat.size > MAX_FILE_BYTES) {
+      skipped.tooLarge++;
+      return null;
+    }
+    const bytes = await fs.readFile(abs);
+    if (looksBinary(bytes)) {
+      skipped.binary++;
+      return null;
+    }
+    let content: string;
+    try {
+      content = utf8.decode(bytes);
+    } catch {
+      // Non-UTF-8 files cannot be round-tripped safely on commit, so they are not ingested.
+      skipped.nonUtf8++;
+      return null;
+    }
+    return describeFile(rel, content);
+  } catch {
+    skipped.unreadable++;
+    return null;
+  }
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i]);
       }
-      fileHandle = await current.getFileHandle(fileName, { create: true });
-    } catch (createErr) {
-      throw new Error(`Failed to locate/create file handle for ${filePath}: ${createErr}`);
+    })
+  );
+  return out;
+}
+
+export async function walkWorkspace(root: string, maxFiles = Number(process.env.AETHEROPS_MAX_FILES) || MAX_FILES): Promise<WalkSummary> {
+  assertEnabled();
+  const realRoot = await fs.realpath(root);
+  const skipped: WalkSummary["skipped"] = { ignored: 0, sensitive: 0, binary: 0, tooLarge: 0, nonUtf8: 0, symlink: 0, unreadable: 0 };
+  const candidates: Array<{ abs: string; rel: string }> = [];
+  let truncated = false;
+
+  const rootIgnore = await readIgnoreFile(realRoot);
+  const stack: Array<{ dir: string; rel: string; frames: IgnoreFrame[] }> = [
+    { dir: realRoot, rel: "", frames: rootIgnore ? [{ base: "", matcher: rootIgnore }] : [] },
+  ];
+
+  while (stack.length && !truncated) {
+    const { dir, rel, frames } = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      skipped.unreadable++;
+      continue;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const abs = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        skipped.symlink++;
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (shouldSkipDirectory(entry.name) || isIgnored(frames, childRel, true)) {
+          skipped.ignored++;
+          continue;
+        }
+        const nested = await readIgnoreFile(abs);
+        stack.push({ dir: abs, rel: childRel, frames: nested ? [...frames, { base: childRel, matcher: nested }] : frames });
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (isSensitiveFile(entry.name)) {
+        skipped.sensitive++;
+        continue;
+      }
+      if (isBinaryExtension(entry.name)) {
+        skipped.binary++;
+        continue;
+      }
+      if (isIgnored(frames, childRel, false)) {
+        skipped.ignored++;
+        continue;
+      }
+      if (candidates.length >= maxFiles) {
+        truncated = true;
+        break;
+      }
+      candidates.push({ abs, rel: childRel });
     }
   }
 
-  // Atomic write via FileSystemWritableFileStream
-  let writable: FileSystemWritableFileStream | null = null;
+  const read = await mapLimit(candidates, 16, ({ abs, rel }) => readTextFile(abs, rel, skipped));
+  const files = read.filter((f): f is IngestedFile => f !== null).sort((a, b) => a.path.localeCompare(b.path));
+  return { files, skipped, truncated };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reads and writes
+// ---------------------------------------------------------------------------------------------
+
+export async function readWorkspaceFile(root: string, relPath: string): Promise<{ content: string; hash: string } | null> {
+  const abs = await resolveInside(root, relPath);
   try {
-    writable = (await (fileHandle as any).createWritable({ keepExistingData: false })) as FileSystemWritableFileStream;
-    await writable!.write(newContent);
-    await writable!.close();
+    const content = utf8.decode(await fs.readFile(abs));
+    return { content, hash: await sha256Hex(content) };
   } catch (err) {
-    try {
-      if (writable) await (writable as any).abort?.();
-    } catch {}
-    throw new Error(`Failed to write to local file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
 }
 
-export async function deleteFileFromDisk(
-  dirHandle: FileSystemDirectoryHandle | null | undefined,
-  filePath: string
-): Promise<void> {
-  if (!dirHandle) {
-    throw new Error("RECONNECT_FOLDER: No directory handle active. Please reconnect folder to delete.");
+/**
+ * Atomically replaces a file: verifies the on-disk content still matches `expectedHash`, writes a
+ * sibling temp file, fsyncs, renames over the target, then re-reads and verifies the new hash.
+ */
+export async function writeWorkspaceFileAtomic(root: string, relPath: string, content: string, expectedHash: string): Promise<string> {
+  const abs = await resolveInside(root, relPath);
+  const current = await readWorkspaceFile(root, relPath);
+  if (!current) throw new AppError(409, "DISK_DRIFT", `${relPath} no longer exists on disk; re-sync the workspace`);
+  if (current.hash !== expectedHash) {
+    throw new AppError(409, "DISK_DRIFT", `${relPath} changed on disk since it was analyzed; re-sync before committing`);
   }
 
+  const expectedNewHash = await sha256Hex(content);
+  const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.aetherops-${randomBytes(6).toString("hex")}.tmp`);
+  const mode = (await fs.stat(abs)).mode;
+  const handle = await fs.open(temp, "wx", mode);
   try {
-    const perm = await (dirHandle as any).queryPermission({ mode: "readwrite" });
-    if (perm !== "granted") {
-      const req = await (dirHandle as any).requestPermission({ mode: "readwrite" });
-      if (req !== "granted") throw new Error("Permission denied");
-    }
-  } catch {}
-
-  const parts = filePath.split("/").filter(Boolean);
-  const fileName = parts.pop()!;
-  const dirPath = parts.join("/");
-
-  try {
-    const parentHandle = dirPath ? await getDirHandleFromPath(dirHandle, dirPath) : dirHandle;
-    await (parentHandle as any).removeEntry(fileName);
-  } catch (e: any) {
-    // If not found, consider success
-    if (e?.name === "NotFoundError") return;
-    throw new Error(`Failed to delete ${filePath} from disk: ${e?.message || String(e)}`);
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
+  try {
+    await fs.rename(temp, abs);
+  } catch (err) {
+    await fs.rm(temp, { force: true });
+    throw err;
+  }
+
+  const written = await readWorkspaceFile(root, relPath);
+  if (!written || written.hash !== expectedNewHash) {
+    throw new AppError(500, "INTEGRITY_FAILED", `Post-write verification failed for ${relPath}`);
+  }
+  return expectedNewHash;
 }
 
-// Helper to store/restore dir handle via IndexedDB? For now in-memory only per spec
-// Spec says handle lives client-side, not dependent on hosting. So we keep in global state.
-
-export function chunkFiles(files: LocalFileEntry[], chunkSize = 20): LocalFileEntry[][] {
-  const chunks: LocalFileEntry[][] = [];
-  for (let i = 0; i < files.length; i += chunkSize) {
-    chunks.push(files.slice(i, i + chunkSize));
+export async function deleteWorkspaceFile(root: string, relPath: string): Promise<boolean> {
+  const abs = await resolveInside(root, relPath);
+  try {
+    await fs.unlink(abs);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
   }
-  return chunks;
 }

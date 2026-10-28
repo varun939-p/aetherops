@@ -1,0 +1,21 @@
+import { getDb } from "@/db";
+import { assertLocalRequest, handle, ok, readJson } from "@/lib/api";
+import { createWorkspaceSchema } from "@/lib/contracts";
+import { assertSchemaReady } from "@/lib/db-init";
+import { listWorkspaceDtos, toWorkspaceDto } from "@/server/queries";
+import { createWorkspace } from "@/server/workspaces";
+
+export const runtime = "nodejs";
+
+export const GET = handle(async () => {
+  await assertSchemaReady();
+  return ok(await listWorkspaceDtos(await getDb()));
+});
+
+export const POST = handle(async (req) => {
+  await assertSchemaReady();
+  const input = await readJson(req, createWorkspaceSchema, 64 * 1024);
+  if (input.kind === "server") assertLocalRequest(req);
+  const ws = await createWorkspace(await getDb(), input);
+  return ok(toWorkspaceDto(ws, 0), {}, 201);
+});
