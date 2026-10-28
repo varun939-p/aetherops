@@ -138,7 +138,8 @@ with requests.post(BASE + "/api/analyze", json={"workspaceId": 1, "scope": "all"
 ## Security notes
 
 - There is no user authentication. Run it on localhost; filesystem endpoints refuse non-loopback `Host` headers
-  (add names to `AETHEROPS_TRUSTED_HOSTS` only if you put an authenticating proxy in front).
+  (`localhost`, `127.0.0.1`, `::1` and `*.localhost`, which covers Pinokio's `https://<port>.localhost` proxy)
+  — add names to `AETHEROPS_TRUSTED_HOSTS` only if you put an authenticating proxy in front.
 - Hosted deployments (e.g. Vercel) automatically disable server filesystem access. Anyone who can reach a hosted
   instance can read stored file contents; do not expose one publicly without adding authentication.
 - Credential files are never ingested, stored, or sent to the AI provider. Secrets found inside regular source

@@ -101,7 +101,9 @@ export function assertLocalRequest(req: NextRequest): void {
   const host = (req.headers.get("host") ?? "").toLowerCase();
   const hostname = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
   const trusted = (process.env.AETHEROPS_TRUSTED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
-  if (!LOOPBACK.has(hostname) && !trusted.includes(hostname)) {
+  // *.localhost always resolves to loopback (RFC 6761), e.g. Pinokio's https://3000.localhost proxy.
+  const loopbackName = hostname.endsWith(".localhost");
+  if (!LOOPBACK.has(hostname) && !loopbackName && !trusted.includes(hostname)) {
     throw new AppError(403, "FORBIDDEN_ORIGIN", "Filesystem operations are only served on localhost (see AETHEROPS_TRUSTED_HOSTS)");
   }
 }
