@@ -1,8 +1,21 @@
 # AetherOps
 
+**Live demo:** [https://aetherops-flame.vercel.app](https://aetherops-flame.vercel.app) (hosted builds run in browser mode; see [Filesystem modes](#filesystem-modes))
+
 Real-time SRE codebase analysis and remediation workspace. Link a local repository, get deterministic
 security/reliability findings in milliseconds, add AI root-cause analysis with line-range patches, review
 the diff, and write the fix back to disk (optionally as a git commit) — with hashes verified at every step.
+
+### Key capabilities
+
+- **Closed-loop remediation:** findings → AI line-range patch → reviewed diff → atomic, hash-verified write → optional single-file git commit → issues marked fixed.
+- **Responsive at repository scale:** SHA-256 delta sync, virtualized explorer/source/diff views, and NDJSON-streamed batch scans keep the UI interactive on thousands of files.
+- **Safe file handling:** atomic writes that refuse to overwrite files changed since analysis, in both server mode and the browser File System Access fallback.
+
+### Prerequisites
+
+- Node.js 20.12+ and git.
+- Chrome or Edge for browser mode (File System Access API). Server mode works in any browser.
 
 ## How it works
 
@@ -25,8 +38,6 @@ the diff, and write the fix back to disk (optionally as a git commit) — with h
   hashes. No git integration.
 
 ## Setup
-
-Requirements: Node 20.12+, git (for commits).
 
 ```bash
 npm install
