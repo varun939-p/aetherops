@@ -73,7 +73,8 @@ Add `GEMINI_API_KEY` and `GEMINI_MODEL` to enable deep analysis and patches.
 | `npm run dev` / `build` / `start` | Next.js |
 | `npm test` | Node test runner: rules, patching, AI orchestration (fake provider), filesystem boundaries, and full DB flows on in-memory PGlite including a real git commit |
 | `npm run typecheck` / `lint` | `tsc --noEmit` / ESLint |
-| `npm run db:generate` / `db:migrate` / `db:check` | Drizzle Kit |
+| `npm run db:migrate` | Applies `drizzle/` migrations to `DATABASE_URL` (Postgres or `pglite:`) and prints the real error, with a hint, if the database is unreachable |
+| `npm run db:generate` / `db:check` | Drizzle Kit |
 
 ## API
 
