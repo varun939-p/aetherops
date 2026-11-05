@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { Pool, type PoolConfig } from "pg";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -29,6 +29,114 @@ const CLOUD_POOLER_HOST = /\.(supabase\.(co|com|in|net)|neon\.tech|render\.com|r
 const ORM_ONLY_PARAMS = ["pgbouncer", "connection_limit", "pool_timeout", "supa", "sslmode", "sslaccept"];
 const LENIENT_TLS: PoolConfig["ssl"] = { ["reject" + "Unauthorized"]: false };
 
+const BOOTSTRAP_DDL = [
+  `DO $$ BEGIN CREATE TYPE "public"."analysis_engine" AS ENUM('heuristic', 'hybrid'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."file_status" AS ENUM('pending', 'analyzing', 'issues', 'clean', 'error'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."issue_category" AS ENUM('security', 'reliability', 'performance', 'concurrency', 'maintainability'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."issue_severity" AS ENUM('critical', 'high', 'medium', 'low', 'info'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."issue_source" AS ENUM('heuristic', 'ai'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."issue_status" AS ENUM('open', 'fixed'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."scan_kind" AS ENUM('sync', 'file', 'batch'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."scan_status" AS ENUM('running', 'completed', 'partial', 'failed'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `DO $$ BEGIN CREATE TYPE "public"."workspace_kind" AS ENUM('server', 'browser', 'demo'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`,
+  `ALTER TYPE "public"."workspace_kind" ADD VALUE IF NOT EXISTS 'demo';`,
+  `CREATE TABLE IF NOT EXISTS "workspaces" (
+    "id" serial PRIMARY KEY NOT NULL,
+    "kind" "workspace_kind" NOT NULL,
+    "name" varchar(255) NOT NULL,
+    "root_path" text NOT NULL,
+    "root_key" varchar(1024) NOT NULL,
+    "is_git_repo" boolean DEFAULT false NOT NULL,
+    "git_branch" varchar(255),
+    "last_synced_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+  );`,
+  `CREATE TABLE IF NOT EXISTS "files" (
+    "id" serial PRIMARY KEY NOT NULL,
+    "workspace_id" integer NOT NULL REFERENCES "public"."workspaces"("id") ON DELETE cascade,
+    "path" varchar(1024) NOT NULL,
+    "content" text NOT NULL,
+    "content_hash" char(64) NOT NULL,
+    "language" varchar(50) DEFAULT 'plaintext' NOT NULL,
+    "extension" varchar(32) DEFAULT '' NOT NULL,
+    "eol" varchar(4) DEFAULT 'lf' NOT NULL,
+    "file_size" integer DEFAULT 0 NOT NULL,
+    "line_count" integer DEFAULT 0 NOT NULL,
+    "status" "file_status" DEFAULT 'pending' NOT NULL,
+    "engine" "analysis_engine",
+    "analyzed_hash" char(64),
+    "corrected_content" text,
+    "corrected_for_hash" char(64),
+    "quality_score" integer,
+    "summary" text,
+    "error_message" text,
+    "model_used" varchar(100),
+    "lease_expires_at" timestamp with time zone,
+    "last_analyzed_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+  );`,
+  `CREATE TABLE IF NOT EXISTS "issues" (
+    "id" serial PRIMARY KEY NOT NULL,
+    "workspace_id" integer NOT NULL REFERENCES "public"."workspaces"("id") ON DELETE cascade,
+    "file_id" integer NOT NULL REFERENCES "public"."files"("id") ON DELETE cascade,
+    "rule_id" varchar(64) NOT NULL,
+    "title" varchar(255) NOT NULL,
+    "message" text NOT NULL,
+    "remediation" text,
+    "severity" "issue_severity" NOT NULL,
+    "category" "issue_category" NOT NULL,
+    "source" "issue_source" NOT NULL,
+    "status" "issue_status" DEFAULT 'open' NOT NULL,
+    "line" integer NOT NULL,
+    "column" integer DEFAULT 1 NOT NULL,
+    "end_line" integer NOT NULL,
+    "end_column" integer DEFAULT 1 NOT NULL,
+    "content_hash" char(64) NOT NULL,
+    "fixed_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL
+  );`,
+  `CREATE TABLE IF NOT EXISTS "scans" (
+    "id" serial PRIMARY KEY NOT NULL,
+    "workspace_id" integer NOT NULL REFERENCES "public"."workspaces"("id") ON DELETE cascade,
+    "file_id" integer REFERENCES "public"."files"("id") ON DELETE cascade,
+    "kind" "scan_kind" NOT NULL,
+    "status" "scan_status" DEFAULT 'running' NOT NULL,
+    "engine" "analysis_engine" NOT NULL,
+    "model_used" varchar(100),
+    "files_total" integer DEFAULT 0 NOT NULL,
+    "files_scanned" integer DEFAULT 0 NOT NULL,
+    "files_skipped" integer DEFAULT 0 NOT NULL,
+    "issues_found" integer DEFAULT 0 NOT NULL,
+    "duration_ms" integer,
+    "error" text,
+    "meta" jsonb,
+    "started_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "finished_at" timestamp with time zone
+  );`,
+  `CREATE TABLE IF NOT EXISTS "commits" (
+    "id" serial PRIMARY KEY NOT NULL,
+    "workspace_id" integer NOT NULL REFERENCES "public"."workspaces"("id") ON DELETE cascade,
+    "file_id" integer NOT NULL REFERENCES "public"."files"("id") ON DELETE cascade,
+    "path" varchar(1024) NOT NULL,
+    "previous_hash" char(64) NOT NULL,
+    "new_hash" char(64) NOT NULL,
+    "issues_fixed" integer DEFAULT 0 NOT NULL,
+    "git_sha" varchar(64),
+    "git_error" text,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL
+  );`,
+  `CREATE INDEX IF NOT EXISTS "commits_file_idx" ON "commits" USING btree ("file_id");`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "files_workspace_path_uq" ON "files" USING btree ("workspace_id","path");`,
+  `CREATE INDEX IF NOT EXISTS "files_workspace_status_idx" ON "files" USING btree ("workspace_id","status");`,
+  `CREATE INDEX IF NOT EXISTS "issues_file_status_idx" ON "issues" USING btree ("file_id","status");`,
+  `CREATE INDEX IF NOT EXISTS "issues_workspace_status_severity_idx" ON "issues" USING btree ("workspace_id","status","severity");`,
+  `CREATE INDEX IF NOT EXISTS "scans_workspace_started_idx" ON "scans" USING btree ("workspace_id","started_at");`,
+  `CREATE INDEX IF NOT EXISTS "scans_file_idx" ON "scans" USING btree ("file_id");`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "workspaces_kind_root_key_uq" ON "workspaces" USING btree ("kind","root_key");`,
+];
+
 function stripQuotes(val: string): string {
   const trimmed = val.trim();
   if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
@@ -37,10 +145,17 @@ function stripQuotes(val: string): string {
   return trimmed;
 }
 
+function defaultPgliteUrl(): string {
+  return process.env.VERCEL ? "pglite:/tmp/aetherops-pglite" : "pglite:./.data/pglite";
+}
+
 export function getDatabaseUrl(): string {
   const raw = process.env.DATABASE_URL;
   const url = raw ? stripQuotes(raw) : "";
   if (!url) {
+    if (process.env.DATABASE_FALLBACK?.toLowerCase() !== "off") {
+      return defaultPgliteUrl();
+    }
     throw new DatabaseConfigError(
       "DATABASE_URL is not set. Use a postgres:// URL or pglite:./.data/pglite for the embedded local database."
     );
@@ -54,8 +169,10 @@ export function resolveDriver(url: string): DbDriver {
 
 export function resolvePgliteDir(url: string): string {
   const clean = stripQuotes(url);
+  const rawTarget = clean.slice(PGLITE_PREFIX.length) || (process.env.VERCEL ? "/tmp/aetherops-pglite" : ".data/pglite");
+  if (rawTarget === "memory" || rawTarget === ":memory:") return "";
   // Runtime-only location; excluded from Turbopack's file tracing.
-  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), clean.slice(PGLITE_PREFIX.length) || ".data/pglite");
+  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), rawTarget);
 }
 
 export interface SanitizedPostgresUrl {
@@ -127,18 +244,55 @@ export function resolvePoolSsl(host: string | null, sslMode: string | null): Poo
   return undefined;
 }
 
+async function ensureSchema(db: AppDb): Promise<void> {
+  const check = await db.execute(sql`
+    select
+      to_regclass('public.workspaces') is not null as has_workspaces,
+      to_regclass('public.scans') is not null as has_scans,
+      exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'files' and column_name = 'content_hash'
+      ) as has_hash,
+      exists (
+        select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+        where t.typname = 'workspace_kind' and e.enumlabel = 'demo'
+      ) as has_demo
+  `);
+  const [row] = rowsOf<{ has_workspaces: boolean; has_scans: boolean; has_hash: boolean; has_demo: boolean }>(check);
+  if (row?.has_workspaces && row.has_scans && row.has_hash && row.has_demo) return;
+
+  for (const stmt of BOOTSTRAP_DDL) {
+    await db.execute(sql.raw(stmt));
+  }
+}
+
 async function createPgliteHandle(dir: string): Promise<DbHandle> {
-  mkdirSync(dir, { recursive: true });
   const { PGlite } = await import("@electric-sql/pglite");
   const { drizzle: drizzlePglite } = await import("drizzle-orm/pglite");
-  const { migrate } = await import("drizzle-orm/pglite/migrator");
-  const client = new PGlite(dir);
-  await client.waitReady;
-  const db = drizzlePglite(client, { schema });
+  let client;
+  try {
+    if (dir) mkdirSync(dir, { recursive: true });
+    client = dir ? new PGlite(dir) : new PGlite();
+    await client.waitReady;
+  } catch {
+    client = new PGlite();
+    await client.waitReady;
+  }
+  const db = drizzlePglite(client, { schema }) as unknown as AppDb;
   const migrationsFolder = path.resolve(/*turbopackIgnore: true*/ process.cwd(), "drizzle");
-  await migrate(db, { migrationsFolder });
+  if (existsSync(path.join(migrationsFolder, "meta", "_journal.json"))) {
+    try {
+      const { migrate } = await import("drizzle-orm/pglite/migrator");
+      await migrate(db as never, { migrationsFolder });
+    } catch {
+      await ensureSchema(db);
+    }
+  } else {
+    await ensureSchema(db);
+  }
+  await ensureSchema(db);
   return {
-    db: db as unknown as AppDb,
+    db,
     driver: "pglite",
     close: () => client.close(),
   };
@@ -165,19 +319,22 @@ async function createHandle(url: string): Promise<DbHandle> {
 
   try {
     await pool.query("select 1");
+    const db = drizzlePg(pool, { schema }) as unknown as AppDb;
+    await ensureSchema(db);
     return {
-      db: drizzlePg(pool, { schema }) as unknown as AppDb,
+      db,
       driver: "pg",
       close: () => pool.end(),
     };
   } catch (err) {
     await pool.end().catch(() => undefined);
-    if (!process.env.VERCEL && process.env.DATABASE_FALLBACK?.toLowerCase() !== "off") {
+    if (process.env.DATABASE_FALLBACK?.toLowerCase() !== "off") {
       const reason = err instanceof Error ? err.message : String(err);
+      const fallbackUrl = defaultPgliteUrl();
       console.warn(
-        `[db] Primary Postgres (${sanitized.host ?? "remote"}) unreachable (${reason}); falling back to embedded local database (.data/pglite).`
+        `[db] Primary Postgres (${sanitized.host ?? "remote"}) unreachable (${reason}); falling back to embedded database (${fallbackUrl}).`
       );
-      return createPgliteHandle(resolvePgliteDir("pglite:./.data/pglite"));
+      return createPgliteHandle(resolvePgliteDir(fallbackUrl));
     }
     throw err;
   }

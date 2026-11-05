@@ -54,11 +54,11 @@ test("toAppError maps Supavisor XX000 tenant not found and TLS chain errors to 5
   assert.equal(tlsAppErr.code, "DB_UNAVAILABLE");
 });
 
-test("pingDb falls back to embedded PGlite when remote cloud Postgres is unreachable in local dev", async () => {
+test("pingDb falls back to embedded PGlite when remote cloud Postgres is unreachable (local and Vercel)", async () => {
   const prevUrl = process.env.DATABASE_URL;
   const prevVercel = process.env.VERCEL;
   try {
-    delete process.env.VERCEL;
+    process.env.VERCEL = "1";
     globalThis.__aetherDb = undefined;
     process.env.DATABASE_URL = "postgresql://postgres.pausedtenant:Pass@99669@127.0.0.1:1/postgres?pgbouncer=true";
     const { pingDb } = await import("@/db");

@@ -342,7 +342,7 @@ export default function CommandCenter() {
     : !system.db.configured
       ? "DATABASE_URL is not set. Add a postgres:// URL (or pglite:./.data/pglite for the embedded local database) to .env and restart."
       : !system.db.connected
-        ? `Database unreachable: ${system.db.error ?? "unknown error"}`
+        ? (system.db.error ?? "Database is unreachable.")
         : !system.db.migrated
           ? "Database schema is not migrated. Run `npm run db:migrate`, then reload."
           : null;

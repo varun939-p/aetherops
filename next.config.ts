@@ -7,6 +7,9 @@ const nextConfig: NextConfig = {
   turbopack: { root: path.resolve(__dirname) },
   // PGlite ships a WASM Postgres build that must be loaded by Node at runtime, not bundled.
   serverExternalPackages: ["@electric-sql/pglite"],
+  outputFileTracingIncludes: {
+    "/api/**/*": ["./drizzle/**/*"],
+  },
   poweredByHeader: false,
 };
 
