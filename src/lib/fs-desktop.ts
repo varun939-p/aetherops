@@ -35,8 +35,9 @@ export function serverFsStatus(): ServerFsStatus {
     return { enabled: false, reason: "Server filesystem access is disabled on hosted deployments; use the browser folder picker.", allowedRoots: [] };
   }
   const roots = (process.env.AETHEROPS_ALLOWED_ROOTS ?? "")
+    .replace(/^["']|["']$/g, "")
     .split(path.delimiter)
-    .map((r) => r.trim())
+    .map((r) => r.replace(/^["']|["']$/g, "").trim())
     .filter(Boolean)
     .map((r) => path.resolve(r));
   if (roots.length === 0) {

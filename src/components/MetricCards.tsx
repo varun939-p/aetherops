@@ -13,6 +13,8 @@ function Metric({
   value,
   suffix,
   caption,
+  barPct,
+  barTone,
   tone,
   className,
   hintAlign,
@@ -22,20 +24,30 @@ function Metric({
   value: ReactNode;
   suffix?: string;
   caption?: ReactNode;
+  barPct?: number | null;
+  barTone?: string;
   tone?: string;
   className?: string;
   hintAlign?: "left" | "right";
 }) {
   return (
-    <div className={cn("flex min-w-0 flex-col justify-center gap-1 border-r border-line px-4 py-2.5", className)}>
+    <div className={cn("flex min-w-0 flex-col justify-center gap-1 border-r border-line px-3.5 py-2.5 lg:px-4", className)}>
       <div className="flex items-center gap-1.5 text-[12px] font-medium text-fg-subtle">
         <span className="truncate">{label}</span>
         <Hint align={hintAlign}>{hint}</Hint>
       </div>
       <div className="flex items-baseline gap-1.5">
-        <span className={cn("tnum text-[22px] font-semibold leading-none tracking-tight", tone ?? "text-fg")}>{value}</span>
-        {suffix && <span className="text-[12.5px] text-fg-subtle">{suffix}</span>}
+        <span className={cn("tnum text-[21px] font-semibold leading-none tracking-tight lg:text-[22px]", tone ?? "text-fg")}>{value}</span>
+        {suffix && <span className="tnum text-[12px] text-fg-subtle">{suffix}</span>}
       </div>
+      {barPct != null && (
+        <div className="h-1 w-full overflow-hidden rounded-full bg-hover" aria-hidden>
+          <div
+            className={cn("h-full rounded-full transition-[width] duration-300", barTone ?? "bg-accent")}
+            style={{ width: `${Math.max(2, Math.min(100, barPct))}%` }}
+          />
+        </div>
+      )}
       {caption && <div className="tnum truncate text-[12px] text-fg-subtle">{caption}</div>}
     </div>
   );
@@ -46,6 +58,13 @@ function healthTone(h: number | null | undefined): string {
   if (h >= 90) return "text-ok";
   if (h >= 70) return "text-sev-medium";
   return "text-sev-critical";
+}
+
+function healthBarTone(h: number | null | undefined): string {
+  if (h === null || h === undefined) return "bg-fg-faint";
+  if (h >= 90) return "bg-ok";
+  if (h >= 70) return "bg-sev-medium";
+  return "bg-sev-critical";
 }
 
 function healthWord(h: number | null | undefined): string {
@@ -61,7 +80,9 @@ function StatusRow({ state, label, detail }: { state: "ok" | "warn" | "down" | "
     <div className="flex min-w-0 items-center gap-2 text-[12.5px]">
       <span className={cn("size-2 shrink-0 rounded-full", dot)} />
       <span className="w-[68px] shrink-0 text-fg-muted">{label}</span>
-      <span className="truncate text-fg">{detail}</span>
+      <span className="truncate text-fg" title={detail}>
+        {detail}
+      </span>
     </div>
   );
 }
@@ -75,12 +96,14 @@ export function MetricCards({ stats, system, loading }: { stats: StatsDto | unde
   const dbDetail = !db ? "—" : !db.configured ? "Not configured" : !db.connected ? "Unreachable" : !db.migrated ? "Needs migration" : `Connected · ${db.latencyMs ?? "?"} ms`;
 
   return (
-    <div className="grid shrink-0 grid-cols-2 border-b border-line bg-canvas sm:grid-cols-3 lg:grid-cols-[repeat(5,minmax(0,1fr))_minmax(0,1.35fr)]">
+    <div className="grid shrink-0 grid-cols-2 border-b border-line bg-canvas sm:grid-cols-3 lg:grid-cols-[repeat(5,minmax(0,1fr))_minmax(216px,1.35fr)]">
       <Metric
         label="Health score"
         hint="Overall code health from 0 to 100. Each open issue lowers it by severity (critical counts most), weighted by file size. 100 means no open issues."
         value={stats?.healthIndex != null ? stats.healthIndex.toFixed(1) : dash}
         suffix={stats?.healthIndex != null ? "/ 100" : undefined}
+        barPct={stats?.healthIndex ?? null}
+        barTone={healthBarTone(stats?.healthIndex)}
         caption={healthWord(stats?.healthIndex)}
         tone={healthTone(stats?.healthIndex)}
       />
@@ -96,6 +119,8 @@ export function MetricCards({ stats, system, loading }: { stats: StatsDto | unde
         hint="Files whose current content has been analyzed. Files edited since their last analysis count as not analyzed."
         value={stats ? formatInt(stats.files.analyzed) : dash}
         suffix={stats ? `of ${formatInt(stats.files.total)}` : undefined}
+        barPct={stats?.coveragePct ?? null}
+        barTone="bg-accent"
         caption={stats?.coveragePct != null ? `${stats.coveragePct.toFixed(0)}% coverage` : undefined}
         className="hidden sm:flex"
       />
@@ -113,7 +138,7 @@ export function MetricCards({ stats, system, loading }: { stats: StatsDto | unde
         caption={stats?.scanLatency.p95Ms != null ? `95% finish within ${formatMs(stats.scanLatency.p95Ms)}` : "No analyses yet"}
         className="hidden lg:flex"
       />
-      <div className="hidden min-w-0 flex-col justify-center gap-1 px-4 py-2.5 sm:flex">
+      <div className="hidden min-w-0 flex-col justify-center gap-1 px-3.5 py-2.5 sm:flex lg:px-4">
         <div className="flex items-center gap-1.5 text-[12px] font-medium text-fg-subtle">
           System status
           <Hint align="right">
@@ -122,7 +147,7 @@ export function MetricCards({ stats, system, loading }: { stats: StatsDto | unde
         </div>
         <StatusRow state={dbState} label="Database" detail={dbDetail} />
         <StatusRow state={system ? (system.ai.configured ? "ok" : "off") : "off"} label="AI review" detail={system?.ai.configured ? (system.ai.model ?? "On") : "Off (rules only)"} />
-        <StatusRow state={system ? (system.fs.serverMode ? "ok" : "off") : "off"} label="File access" detail={system?.fs.serverMode ? "Local folders" : "Browser only"} />
+        <StatusRow state={system ? (system.fs.serverMode ? "ok" : "off") : "off"} label="File access" detail={system?.fs.serverMode ? "Local + Browser" : "Browser only"} />
       </div>
     </div>
   );

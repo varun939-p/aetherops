@@ -140,7 +140,7 @@ export function IssueTracker({
   const filtersActive = severities.size > 0 || category !== "all" || source !== "all";
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Issues">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface" aria-label="Issues">
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-line px-2">
         {(["issues", "scans"] as const).map((t) => (
           <button
@@ -199,7 +199,7 @@ export function IssueTracker({
               ))}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="relative min-w-[140px] flex-1">
+              <span className="relative min-w-[130px] flex-1">
                 <select
                   value={category}
                   onChange={(e) => setCategory(e.target.value as Category | "all")}

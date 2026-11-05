@@ -129,7 +129,7 @@ export function RepositoryExplorer({
   const withIssues = (files ?? []).filter((f) => f.openIssues > 0).length;
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Files">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface" aria-label="Files">
       <PaneHeader title="Files" hint="Every file AetherOps indexed in this project. Click a file to see its code and issues; hover a file for quick actions.">
         <span className="tnum text-[12px] font-normal text-fg-subtle">{files ? `${files.length} · ${withIssues} with issues` : ""}</span>
       </PaneHeader>
@@ -147,6 +147,16 @@ export function RepositoryExplorer({
             spellCheck={false}
             className="min-w-0 flex-1 bg-transparent text-[13px] text-fg outline-none placeholder:text-fg-faint"
           />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              className="rounded p-0.5 text-fg-subtle hover:bg-hover hover:text-fg"
+              aria-label="Clear file search"
+            >
+              <Icon name="close" size={12} />
+            </button>
+          )}
         </label>
         <Segmented<Quick>
           size="xs"
@@ -194,16 +204,23 @@ export function RepositoryExplorer({
                     title={row.file.path}
                     className={cn(
                       "group mx-1.5 flex h-[30px] cursor-pointer items-center gap-2 rounded-md pr-1.5 text-[13px]",
-                      row.file.id === selectedId ? "bg-accent-soft font-medium text-fg" : "text-fg-muted hover:bg-hover hover:text-fg"
+                      row.file.id === selectedId
+                        ? "bg-accent-soft font-medium text-fg shadow-[inset_2px_0_0_var(--color-accent)]"
+                        : "text-fg-muted hover:bg-hover hover:text-fg"
                     )}
                     style={{ paddingLeft: 4 + row.depth * 14 + 19 }}
                   >
-                    <span className="flex w-3 justify-center">
+                    <span className="flex w-3 shrink-0 justify-center">
                       <FileStatusMark status={row.file.status} critical={row.file.criticalIssues} stale={row.file.stale} />
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">
                       {row.positions ? <HighlightedText text={row.file.path} positions={row.positions} /> : basename(row.file.path)}
                     </span>
+                    {row.file.hasPatch && (
+                      <span className="rounded bg-ok-soft px-1 font-mono text-[10px] font-semibold text-ok group-hover:hidden" title="AI patch ready to review">
+                        FIX
+                      </span>
+                    )}
                     {row.file.openIssues > 0 && (
                       <span className={cn("tnum rounded px-1.5 text-[11.5px] font-semibold group-hover:hidden", countTone(row.file))} title={`${row.file.openIssues} open issues`}>
                         {row.file.openIssues}

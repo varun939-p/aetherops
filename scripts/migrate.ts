@@ -5,6 +5,7 @@
  */
 import path from "node:path";
 import { mkdirSync } from "node:fs";
+import { resolveDriver, resolvePgliteDir, resolvePoolSsl, sanitizePostgresUrl } from "../src/db";
 
 for (const file of [".env.local", ".env"]) {
   try {
@@ -19,6 +20,10 @@ const url = process.env.DATABASE_URL?.trim();
 
 function hint(err: unknown, host: string | null): string {
   const code = (err as { code?: string }).code ?? (err as { cause?: { code?: string } }).cause?.code;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/tenant\/user .* not found/i.test(msg)) {
+    return `Supabase pooler reported "${msg}". On Supabase Free Tier, projects auto-pause after 7 days of inactivity (removing their DNS record). Restore the project in https://supabase.com/dashboard, or continue using the embedded local database (.data/pglite).`;
+  }
   switch (code) {
     case "ENOTFOUND":
     case "EAI_AGAIN":
@@ -35,48 +40,50 @@ function hint(err: unknown, host: string | null): string {
   }
 }
 
+async function migratePglite(dir: string): Promise<void> {
+  mkdirSync(dir, { recursive: true });
+  const { PGlite } = await import("@electric-sql/pglite");
+  const { drizzle } = await import("drizzle-orm/pglite");
+  const { migrate } = await import("drizzle-orm/pglite/migrator");
+  const client = new PGlite(dir);
+  try {
+    await migrate(drizzle(client), { migrationsFolder });
+    console.log(`✓ Migrations applied (embedded database at ${path.relative(process.cwd(), dir)})`);
+  } finally {
+    await client.close();
+  }
+}
+
 async function main(): Promise<number> {
   if (!url) {
     console.error("✗ DATABASE_URL is not set (add it to .env).");
     return 1;
   }
-  if (url.startsWith("pglite:")) {
-    const dir = path.resolve(url.slice("pglite:".length) || ".data/pglite");
-    mkdirSync(dir, { recursive: true });
-    const { PGlite } = await import("@electric-sql/pglite");
-    const { drizzle } = await import("drizzle-orm/pglite");
-    const { migrate } = await import("drizzle-orm/pglite/migrator");
-    const client = new PGlite(dir);
-    try {
-      await migrate(drizzle(client), { migrationsFolder });
-      console.log(`✓ Migrations applied (embedded database at ${path.relative(process.cwd(), dir)})`);
-      return 0;
-    } finally {
-      await client.close();
-    }
+  if (resolveDriver(url) === "pglite") {
+    await migratePglite(resolvePgliteDir(url));
+    return 0;
   }
 
-  const host = (() => {
-    try {
-      return new URL(url).hostname;
-    } catch {
-      return null;
-    }
-  })();
+  const sanitized = sanitizePostgresUrl(url);
+  const host = sanitized.host;
   const { Pool } = await import("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
   const { migrate } = await import("drizzle-orm/node-postgres/migrator");
-  const ssl = process.env.DATABASE_SSL === "disable" ? false : process.env.DATABASE_SSL === "no-verify" ? { rejectUnauthorized: false } : undefined;
-  const pool = new Pool({ connectionString: url, ssl, max: 1, connectionTimeoutMillis: 10_000 });
+  const ssl = resolvePoolSsl(host, sanitized.sslMode);
+  const pool = new Pool({ connectionString: sanitized.connectionString, ssl, max: 1, connectionTimeoutMillis: 10_000 });
   try {
     await migrate(drizzle(pool), { migrationsFolder });
     console.log(`✓ Migrations applied (${host ?? "postgres"})`);
     return 0;
   } catch (err) {
     const cause = (err as { cause?: unknown }).cause ?? err;
-    console.error(`✗ Migration failed on ${host ?? "postgres"}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    console.warn(`⚠ Primary Postgres (${host ?? "postgres"}) migration failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     const h = hint(cause, host);
-    if (h) console.error(`  ${h}`);
+    if (h) console.warn(`  ${h}`);
+    if (!process.env.VERCEL && process.env.DATABASE_FALLBACK?.toLowerCase() !== "off") {
+      await migratePglite(resolvePgliteDir("pglite:./.data/pglite"));
+      return 0;
+    }
     return 1;
   } finally {
     await pool.end().catch(() => undefined);

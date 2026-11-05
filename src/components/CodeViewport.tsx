@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { FileDetailDto, IssueDto, Severity } from "@/lib/contracts";
+import type { FileDetailDto, FileSummaryDto, IssueDto, Severity } from "@/lib/contracts";
 import { buildDiff, type DiffModel } from "@/lib/diff-rows";
 import { highlightLines, type Token } from "@/lib/highlight";
 import { splitLines } from "@/lib/text";
 import { CODE_ZOOM_STEPS, DEFAULT_CODE_SIZE, useCodeFontSize } from "@/lib/use-preferences";
 import { useVirtualRows } from "@/lib/use-virtual";
-import { cn, formatInt, relativeTime } from "@/lib/utils";
+import { basename, cn, formatInt, relativeTime } from "@/lib/utils";
 import { Button, EmptyState, Hint, Icon, IconButton, SEVERITY_BG, SEVERITY_LABEL, SEVERITY_ORDER, SEVERITY_TEXT, Segmented, SkeletonRows } from "./ui";
 
 export interface FocusRequest {
@@ -275,6 +275,7 @@ function StatusSummary({ file, openIssues }: { file: FileDetailDto; openIssues: 
 
 export function CodeViewport({
   file,
+  files,
   loading,
   focus,
   aiConfigured,
@@ -284,9 +285,11 @@ export function CodeViewport({
   committing,
   onAnalyze,
   onCommit,
+  onSelectFile,
   onOpenFirst,
 }: {
   file: FileDetailDto | undefined;
+  files?: FileSummaryDto[] | undefined;
   loading: boolean;
   focus: FocusRequest | null;
   aiConfigured: boolean;
@@ -296,6 +299,7 @@ export function CodeViewport({
   committing: boolean;
   onAnalyze: () => void;
   onCommit: (opts: { git: boolean }) => void;
+  onSelectFile?: (id: number) => void;
   onOpenFirst: (() => void) | null;
 }) {
   const [view, setView] = useState<"source" | "diff">("source");
@@ -325,21 +329,26 @@ export function CodeViewport({
     setFontSize(steps[Math.min(steps.length - 1, Math.max(0, idx + direction))]);
   };
 
+  const priorityFiles = useMemo(
+    () => [...(files ?? [])].sort((a, b) => b.criticalIssues - a.criticalIssues || b.openIssues - a.openIssues || a.path.localeCompare(b.path)).slice(0, 3),
+    [files]
+  );
+
   if (!file) {
     return (
-      <section className="flex min-h-0 flex-col bg-canvas" aria-label="Code">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas" aria-label="Code">
         {loading ? (
           <SkeletonRows rows={22} />
         ) : (
-          <div className="flex h-full items-center justify-center p-8">
-            <div className="w-full max-w-[460px] rounded-xl border border-line bg-surface p-6">
+          <div className="flex min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+            <div className="mx-auto my-auto w-full max-w-[460px] rounded-xl border border-line bg-surface p-6">
               <div className="text-[16px] font-semibold text-fg">{isDemo ? "Try AetherOps on the sample project" : "Select a file to begin"}</div>
               <p className="mt-1.5 text-[13px] leading-relaxed text-fg-subtle">
                 {isDemo
                   ? "Three small services with real-world bugs are loaded. Nothing here touches your computer, and Reset sample restores them at any time."
                   : "Pick a file in the Files panel, or click an issue to jump straight to the line that needs attention."}
               </p>
-              <ol className="mt-5 space-y-3.5">
+              <ol className="mt-4 space-y-3">
                 {[
                   ["Open a file", "Issues are highlighted next to the line numbers and listed on the right."],
                   ["Review an issue", "Click it to jump to the exact line and read how to fix it."],
@@ -354,8 +363,28 @@ export function CodeViewport({
                   </li>
                 ))}
               </ol>
+              {onSelectFile && priorityFiles.length > 0 && (
+                <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-line pt-3.5">
+                  <span className="mr-1 text-[11.5px] font-medium text-fg-subtle">Quick open:</span>
+                  {priorityFiles.map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => onSelectFile(f.id)}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-line-strong bg-canvas px-2.5 py-1 font-mono text-[12px] text-fg transition-colors hover:border-accent hover:bg-accent-soft"
+                    >
+                      <span>{basename(f.path)}</span>
+                      {f.openIssues > 0 && (
+                        <span className={cn("tnum text-[11px] font-semibold", f.criticalIssues > 0 ? "text-sev-critical" : "text-fg-muted")}>
+                          ({f.openIssues})
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
               {onOpenFirst && (
-                <Button variant="primary" className="mt-6" icon="file" onClick={onOpenFirst}>
+                <Button variant="primary" className="mt-5" icon="file" onClick={onOpenFirst}>
                   Open the first sample file
                 </Button>
               )}
@@ -381,7 +410,7 @@ export function CodeViewport({
 
   return (
     <section
-      className="flex min-h-0 flex-col bg-canvas"
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas"
       aria-label="Code"
       onKeyDown={(e) => {
         if (!(e.ctrlKey || e.metaKey)) return;
@@ -391,15 +420,15 @@ export function CodeViewport({
         action();
       }}
     >
-      <div className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-canvas px-4">
-        <span className="min-w-[120px] shrink truncate font-mono text-[13px]" title={`${file.path}\nSHA-256 ${file.contentHash}\n${file.eol.toUpperCase()} line endings`}>
+      <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-2.5 border-b border-line bg-canvas px-4 py-1.5">
+        <span className="min-w-[100px] flex-1 truncate font-mono text-[13px]" title={`${file.path}\nSHA-256 ${file.contentHash}\n${file.eol.toUpperCase()} line endings`}>
           <span className="text-fg-subtle">{dir}</span>
           <span className="font-semibold text-fg">{name}</span>
         </span>
         <span className="hidden shrink-0 text-[12px] text-fg-subtle 2xl:inline">
           {file.language} · {formatInt(file.lineCount)} lines
         </span>
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
           <Segmented
             label="View"
             value={view}

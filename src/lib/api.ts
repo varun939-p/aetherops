@@ -38,7 +38,18 @@ export function ok<T>(data: T, meta: Record<string, unknown> = {}, status = 200)
 
 const PG_SCHEMA_CODES = new Set(["42P01", "42703", "42704", "42883"]);
 const PG_CONNECTION_CODES = new Set(["28P01", "28000", "3D000", "57P01", "57P03", "08000", "08001", "08003", "08004", "08006"]);
-const NET_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "EHOSTUNREACH"]);
+const NET_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
 
 function rootCauses(err: unknown): unknown[] {
   const chain: unknown[] = [];
@@ -59,12 +70,21 @@ export function toAppError(err: unknown): AppError {
     if (cause instanceof AppError) return cause;
     if (cause instanceof DatabaseConfigError) return new AppError(503, "DB_NOT_CONFIGURED", cause.message);
     const code = (cause as { code?: unknown }).code;
+    const msg = cause instanceof Error ? cause.message : "";
     if (typeof code === "string") {
       if (PG_SCHEMA_CODES.has(code)) return new AppError(503, "SCHEMA_NOT_MIGRATED", "Database schema is out of date. Run `npm run db:migrate`.");
-      if (PG_CONNECTION_CODES.has(code) || NET_CODES.has(code)) return new AppError(503, "DB_UNAVAILABLE", "Database is unreachable");
+      if (PG_CONNECTION_CODES.has(code) || NET_CODES.has(code)) {
+        return new AppError(503, "DB_UNAVAILABLE", msg ? `Database is unreachable: ${msg}` : "Database is unreachable");
+      }
+      if (code === "XX000" && /tenant\/user .* not found|ENOTFOUND|circuit breaker|db_termination/i.test(msg)) {
+        return new AppError(503, "DB_UNAVAILABLE", `Database is unreachable: ${msg}`);
+      }
     }
-    if (cause instanceof Error && /Connection terminated|timeout exceeded when trying to connect/i.test(cause.message)) {
-      return new AppError(503, "DB_UNAVAILABLE", "Database is unreachable");
+    if (
+      cause instanceof Error &&
+      /Connection terminated|timeout exceeded when trying to connect|self-signed certificate|tenant\/user .* not found/i.test(cause.message)
+    ) {
+      return new AppError(503, "DB_UNAVAILABLE", `Database is unreachable: ${cause.message}`);
     }
   }
   return new AppError(500, "INTERNAL", "Unexpected server error");

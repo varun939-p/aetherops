@@ -126,7 +126,7 @@ export default function CommandCenter() {
   // ------------------------------------------------------------------ handles (browser mode)
   const getHandle = useCallback(async (ws: WorkspaceDto): Promise<FileSystemDirectoryHandle> => {
     const cached = handles.current.get(ws.id) ?? (await loadHandle(ws.id));
-    if (!cached) throw new Error(`The browser no longer holds a handle for "${ws.name}". Use Link workspace → Choose folder to reconnect it.`);
+    if (!cached) throw new Error(`The browser no longer holds a handle for "${ws.name}". Use Open folder → Choose folder to reconnect it.`);
     handles.current.set(ws.id, cached);
     return cached;
   }, []);
@@ -350,7 +350,7 @@ export default function CommandCenter() {
   const progressPct = activity?.total ? Math.min(100, (activity.done / Math.max(1, activity.total)) * 100) : null;
 
   return (
-    <div className="grid h-dvh grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_auto_minmax(0,1fr)_32px] overflow-hidden bg-canvas">
+    <div className="grid h-dvh w-full max-w-[100vw] grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_auto_minmax(0,1fr)_32px] overflow-hidden bg-canvas">
       <WorkspaceBar
         system={system}
         workspaces={workspaces}
@@ -369,7 +369,7 @@ export default function CommandCenter() {
 
       <MetricCards stats={stats} system={system} loading={statsLoading} />
 
-      <div>
+      <div className="min-w-0">
         {activity && (
           <div className="relative h-[2px] overflow-hidden bg-line">
             {progressPct === null ? <div className="progress-indeterminate absolute inset-0" /> : <div className="h-full bg-accent transition-[width]" style={{ width: `${progressPct}%` }} />}
@@ -402,11 +402,13 @@ export default function CommandCenter() {
         )}
       </div>
 
-      <main className="relative grid min-h-0 grid-cols-1 divide-x divide-line md:grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[288px_minmax(0,1fr)_400px]">
+      <main className="relative grid min-h-0 min-w-0 grid-cols-1 divide-x divide-line overflow-hidden md:grid-cols-[clamp(220px,20vw,276px)_minmax(0,1fr)] lg:grid-cols-[clamp(216px,18vw,272px)_minmax(0,1fr)_clamp(300px,25vw,396px)]">
         <div
           className={cn(
-            "min-h-0 md:static md:flex md:flex-col",
-            overlay === "explorer" ? "absolute inset-y-0 left-0 z-30 flex w-[min(320px,85vw)] flex-col border-r border-line shadow-[var(--shadow-pop)]" : "hidden"
+            "min-h-0 min-w-0 overflow-hidden md:static md:flex md:flex-col",
+            overlay === "explorer"
+              ? "absolute inset-y-0 left-0 z-30 flex w-[min(320px,85vw)] flex-col border-r border-line bg-surface shadow-[var(--shadow-pop)]"
+              : "hidden"
           )}
         >
           <RepositoryExplorer files={files} loading={filesLoading} selectedId={selectedId} onSelect={selectFile} onAnalyze={analyze} onDelete={deleteFile} />
@@ -414,11 +416,13 @@ export default function CommandCenter() {
 
         <CodeViewport
           file={detail}
+          files={files}
           loading={detailLoading}
           focus={focus}
           aiConfigured={aiConfigured}
           canGitCommit={active?.kind === "server" && active.isGitRepo}
           isDemo={isDemo}
+          onSelectFile={selectFile}
           onOpenFirst={isDemo && files?.length ? () => selectFile([...files].sort((a, b) => b.criticalIssues - a.criticalIssues || a.path.localeCompare(b.path))[0].id) : null}
           analyzing={analyzingId !== null && analyzingId === selectedId}
           committing={committing}
@@ -428,8 +432,10 @@ export default function CommandCenter() {
 
         <div
           className={cn(
-            "min-h-0 xl:static xl:flex xl:flex-col",
-            overlay === "issues" ? "absolute inset-y-0 right-0 z-30 flex w-[min(420px,92vw)] flex-col border-l border-line shadow-[var(--shadow-pop)]" : "hidden"
+            "min-h-0 min-w-0 overflow-hidden lg:static lg:flex lg:flex-col",
+            overlay === "issues"
+              ? "absolute inset-y-0 right-0 z-30 flex w-[min(400px,92vw)] flex-col border-l border-line bg-surface shadow-[var(--shadow-pop)]"
+              : "hidden"
           )}
         >
           <IssueTracker
@@ -446,7 +452,7 @@ export default function CommandCenter() {
         </div>
       </main>
 
-      <footer className="flex items-center gap-4 border-t border-line bg-canvas px-4 text-[12px] text-fg-subtle">
+      <footer className="flex min-w-0 items-center gap-4 border-t border-line bg-canvas px-4 text-[12px] text-fg-subtle">
         {activity ? (
           <span className="flex min-w-0 items-center gap-2 text-fg-muted">
             <Spinner className="size-3" />
@@ -457,10 +463,10 @@ export default function CommandCenter() {
             {activity.detail && <span className="truncate font-mono text-[11.5px] text-fg-subtle">{activity.detail}</span>}
           </span>
         ) : (
-          <span>{active ? `${formatInt(files?.length ?? 0)} files indexed` : "No project open"}</span>
+          <span className="truncate">{active ? `${formatInt(files?.length ?? 0)} files indexed` : "No project open"}</span>
         )}
         {stats && (
-          <span className="tnum ml-auto hidden shrink-0 sm:inline">
+          <span className="tnum ml-auto shrink-0">
             {formatInt(stats.openIssues.total)} open · {formatInt(stats.fixedIssues)} fixed
           </span>
         )}

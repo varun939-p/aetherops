@@ -41,6 +41,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# agent skills & local clones
+/.agents/
+/antigravity-awesome-skills/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

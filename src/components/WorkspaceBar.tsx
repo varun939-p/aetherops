@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { SystemDto, WorkspaceDto } from "@/lib/contracts";
 import { useTheme } from "@/lib/use-preferences";
@@ -67,13 +68,21 @@ export function WorkspaceBar({
     : undefined;
 
   return (
-    <header className="flex h-14 min-w-0 shrink-0 items-center gap-3 border-b border-line bg-canvas px-4">
+    <header className="flex h-14 min-w-0 shrink-0 items-center gap-2.5 border-b border-line bg-canvas px-3.5 lg:gap-3 lg:px-4">
       <IconButton icon="sidebar" label="Show files" className="md:hidden" onClick={() => onTogglePane("explorer")} />
-      <div className="flex shrink-0 items-center gap-2">
-        <span className="flex size-7 items-center justify-center rounded-md bg-fg text-[13px] font-bold text-canvas">A</span>
+
+      <Link href="/" className="flex shrink-0 items-center gap-2 outline-none" title="AetherOps Command Center">
+        <span className="relative flex size-7 items-center justify-center rounded-md bg-fg text-[13px] font-bold text-canvas">
+          A
+          <span
+            className={`absolute -bottom-0.5 -right-0.5 size-2 rounded-full border-[1.5px] border-canvas ${ready ? "bg-ok" : "bg-sev-critical"}`}
+            aria-hidden
+          />
+        </span>
         <span className="hidden text-[15px] font-semibold tracking-tight text-fg sm:inline">AetherOps</span>
-      </div>
-      <span className="h-6 w-px shrink-0 bg-line" />
+      </Link>
+
+      <span className="h-5 w-px shrink-0 bg-line" />
 
       <label className="flex min-w-0 items-center gap-2" title={workspaceTitle}>
         <span className="hidden shrink-0 text-[12.5px] text-fg-subtle lg:inline">Project</span>
@@ -82,7 +91,7 @@ export function WorkspaceBar({
             value={active?.id ?? ""}
             onChange={(e) => onSelect(Number(e.target.value))}
             disabled={!workspaces?.length}
-            className="h-8 w-full min-w-[150px] max-w-[260px] appearance-none truncate rounded-md border border-line-strong bg-raised pl-3 pr-8 text-[13px] font-medium text-fg outline-none focus:border-accent disabled:text-fg-subtle"
+            className="h-8 w-full min-w-[140px] max-w-[230px] cursor-pointer appearance-none truncate rounded-md border border-line-strong bg-raised pl-2.5 pr-7 text-[13px] font-medium text-fg outline-none hover:border-fg-faint focus:border-accent disabled:text-fg-subtle sm:min-w-[160px] sm:max-w-[260px]"
             aria-label="Project"
           >
             {!workspaces?.length && <option value="">No project</option>}
@@ -92,20 +101,32 @@ export function WorkspaceBar({
               </option>
             ))}
           </select>
-          <Icon name="chevronDown" size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-fg-subtle" />
+          <Icon name="chevronDown" size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-fg-subtle" />
         </span>
       </label>
-      {isDemo && <span className="hidden shrink-0 rounded-full bg-accent-soft px-2.5 py-0.5 text-[12px] font-medium text-accent 2xl:inline">Sample project · try it freely</span>}
 
-      <div className="ml-auto flex shrink-0 items-center gap-2">
+      {isDemo && (
+        <span className="hidden shrink-0 rounded-full bg-accent-soft px-2.5 py-0.5 text-[12px] font-medium text-accent xl:inline">
+          Sample project · try it freely
+        </span>
+      )}
+
+      <div className="ml-auto flex shrink-0 items-center gap-1.5 lg:gap-2">
         <div className="relative" ref={popRef}>
           <Button size="sm" icon="folder" disabled={!ready} onClick={() => setOpen((o) => !o)} title="Analyze your own code">
             <span className="hidden lg:inline">Open folder</span>
           </Button>
           {open && (
             <div className="absolute right-0 top-10 z-50 w-[min(440px,calc(100vw-24px))] rounded-lg border border-line bg-raised p-4 shadow-[var(--shadow-pop)]">
-              <div className="text-[14px] font-semibold text-fg">Analyze your own code</div>
-              <p className="mt-1 text-[12.5px] leading-relaxed text-fg-subtle">Point AetherOps at a project folder. Files are scanned instantly; nothing is changed until you apply a fix.</p>
+              <div className="flex items-center justify-between">
+                <div className="text-[14px] font-semibold text-fg">Analyze your own code</div>
+                <span className="rounded bg-accent-soft px-2 py-0.5 font-mono text-[11px] font-medium text-accent">
+                  {serverMode ? "Local + Browser" : "Browser only"}
+                </span>
+              </div>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-fg-subtle">
+                Point AetherOps at a project folder. Files are scanned instantly; nothing is changed until you apply a fix.
+              </p>
 
               <div className="mt-4 text-[12.5px] font-medium text-fg">Folder on this computer</div>
               {serverMode ? (
@@ -128,42 +149,93 @@ export function WorkspaceBar({
                   </Button>
                 </form>
               ) : (
-                <p className="mt-1 text-[12.5px] leading-relaxed text-fg-subtle">Not available on this deployment. Use a browser folder below, or run AetherOps locally.</p>
+                <p className="mt-1 text-[12.5px] leading-relaxed text-fg-subtle">
+                  Not available on this deployment. Use a browser folder below, or run AetherOps locally.
+                </p>
               )}
-              {serverMode && <p className="mt-1.5 text-[12px] leading-relaxed text-fg-subtle">Must be inside: {system?.fs.allowedRoots.join(", ")}. Supports git commits.</p>}
+              {serverMode && (
+                <p className="mt-1.5 text-[12px] leading-relaxed text-fg-subtle">
+                  Must be inside: {system?.fs.allowedRoots.join(", ")}. Supports git commits.
+                </p>
+              )}
 
               <div className="mt-4 text-[12.5px] font-medium text-fg">Folder via your browser</div>
               <div className="mt-1.5 flex items-center gap-2">
                 <Button size="sm" icon="folder" disabled={!browserSupported || busy} onClick={() => (setOpen(false), onLinkBrowser())}>
                   Choose folder…
                 </Button>
-                <span className="text-[12px] text-fg-subtle">{browserSupported ? "Chrome or Edge will ask for permission." : "Requires Chrome or Edge."}</span>
+                <span className="text-[12px] text-fg-subtle">
+                  {browserSupported ? "Chrome or Edge will ask for permission." : "Requires Chrome or Edge."}
+                </span>
               </div>
             </div>
           )}
         </div>
 
-        {isDemo ? (
-          <Button size="sm" icon="rotate" disabled={!active || busy} onClick={onResetDemo} title="Restore the sample files to their original, unfixed state">
+        <Button
+          size="sm"
+          icon="refresh"
+          disabled={!active || busy || isDemo}
+          onClick={onSync}
+          title={
+            isDemo
+              ? "Built-in sample project has no disk folder to sync; use Reset sample to restore original files"
+              : "Re-read the folder; only changed files are processed"
+          }
+        >
+          <span className="hidden xl:inline">Sync</span>
+        </Button>
+
+        {isDemo && (
+          <Button
+            size="sm"
+            icon="rotate"
+            disabled={!active || busy}
+            onClick={onResetDemo}
+            title="Restore the sample files to their original, unfixed state"
+          >
             <span className="hidden xl:inline">Reset sample</span>
           </Button>
-        ) : (
-          <Button size="sm" icon="refresh" disabled={!active || busy} onClick={onSync} title="Re-read the folder; only changed files are processed">
-            <span className="hidden xl:inline">Sync</span>
-          </Button>
         )}
-        <Button size="sm" icon="play" disabled={!active || busy} onClick={() => onScan("heuristic")} title="Run the built-in rules on files that changed (instant, offline)">
-          <span className="hidden xl:inline">Quick scan</span>
+
+        <Button
+          size="sm"
+          icon="play"
+          disabled={!active || busy}
+          onClick={() => onScan("heuristic")}
+          title="Run the built-in rules on files that changed (instant, offline)"
+        >
+          <span className="hidden lg:inline">Quick scan</span>
         </Button>
+
         {system?.ai.configured && (
-          <Button size="sm" variant="primary" icon="sparkle" disabled={!active || busy} onClick={() => onScan("hybrid")} title="AI review of every file not yet checked by AI; generates fixes">
-            <span className="hidden xl:inline">AI review</span>
+          <Button
+            size="sm"
+            variant="primary"
+            icon="sparkle"
+            disabled={!active || busy}
+            onClick={() => onScan("hybrid")}
+            title="AI review of every file not yet checked by AI; generates fixes"
+          >
+            <span className="hidden lg:inline">AI review</span>
           </Button>
         )}
-        <span className="mx-0.5 h-6 w-px bg-line" />
-        <IconButton icon={theme === "dark" ? "sun" : "moon"} label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={() => setTheme(theme === "dark" ? "light" : "dark")} />
-        {active && !isDemo && <IconButton icon="close" label="Remove project from AetherOps (files on disk are kept)" disabled={busy} onClick={onUnlink} />}
-        <IconButton icon="alert" label="Show issues" className="xl:hidden" onClick={() => onTogglePane("issues")} />
+
+        <span className="mx-0.5 h-5 w-px bg-line" />
+        <IconButton
+          icon={theme === "dark" ? "sun" : "moon"}
+          label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+        />
+        {active && !isDemo && (
+          <IconButton
+            icon="close"
+            label="Remove project from AetherOps (files on disk are kept)"
+            disabled={busy}
+            onClick={onUnlink}
+          />
+        )}
+        <IconButton icon="alert" label="Show issues" className="lg:hidden" onClick={() => onTogglePane("issues")} />
       </div>
     </header>
   );
