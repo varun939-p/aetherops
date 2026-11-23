@@ -1,6 +1,6 @@
 # AetherOps
 
-**Live demo:** [https://aetherops-flame.vercel.app](https://aetherops-flame.vercel.app) (hosted builds run in browser mode; see [Filesystem modes](#filesystem-modes))
+**Live demo:** https://aetherops-xi.vercel.app/ (hosted builds run in browser mode; see [Filesystem modes](#filesystem-modes))
 
 Real-time SRE codebase analysis and remediation workspace. Link a local repository, get deterministic
 security/reliability findings in milliseconds, add AI root-cause analysis with line-range patches, review
