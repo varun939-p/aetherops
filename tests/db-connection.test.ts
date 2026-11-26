@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizePostgresUrl, resolvePoolSsl } from "@/db";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pingDb, sanitizePostgresUrl, resolvePoolSsl } from "@/db";
 import { toAppError } from "@/lib/api";
+import { systemStatus } from "@/server/workspaces";
 
 test("sanitizePostgresUrl encodes unescaped @ in password and strips ORM-only query params", () => {
   const raw =
@@ -54,26 +58,74 @@ test("toAppError maps Supavisor XX000 tenant not found and TLS chain errors to 5
   assert.equal(tlsAppErr.code, "DB_UNAVAILABLE");
 });
 
-test("pingDb falls back to embedded PGlite when remote cloud Postgres is unreachable (local and Vercel)", async () => {
-  const prevUrl = process.env.DATABASE_URL;
-  const prevVercel = process.env.VERCEL;
+// Nothing listens on port 1, so this stands in for a paused or deleted cloud database.
+const UNREACHABLE_POSTGRES = "postgresql://postgres.pausedtenant:Pass@99669@127.0.0.1:1/postgres?pgbouncer=true";
+
+async function releaseDbHandle(): Promise<void> {
+  if (globalThis.__aetherDb) await globalThis.__aetherDb.handle.then((h) => h.close()).catch(() => undefined);
+  globalThis.__aetherDb = undefined;
+  globalThis.__aetherSchemaReady = undefined;
+}
+
+/** Runs `fn` against a fresh database handle with exactly the given environment, then restores everything. */
+async function withDbEnv(env: { DATABASE_URL?: string; VERCEL?: string }, fn: () => Promise<void>): Promise<void> {
+  const keys = ["DATABASE_URL", "VERCEL", "DATABASE_FALLBACK"] as const;
+  const previous = keys.map((k) => [k, process.env[k]] as const);
+  const scratch = mkdtempSync(path.join(tmpdir(), "aetherops-db-"));
+  const cwd = process.cwd();
+  await releaseDbHandle();
   try {
-    process.env.VERCEL = "1";
-    globalThis.__aetherDb = undefined;
-    process.env.DATABASE_URL = "postgresql://postgres.pausedtenant:Pass@99669@127.0.0.1:1/postgres?pgbouncer=true";
-    const { pingDb } = await import("@/db");
+    for (const k of keys) delete process.env[k];
+    if (env.DATABASE_URL !== undefined) process.env.DATABASE_URL = env.DATABASE_URL;
+    if (env.VERCEL !== undefined) process.env.VERCEL = env.VERCEL;
+    // The local fallback writes to ./.data/pglite; keep it out of the repository's real database.
+    process.chdir(scratch);
+    await fn();
+  } finally {
+    await releaseDbHandle();
+    process.chdir(cwd);
+    for (const [k, v] of previous) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+test("locally, an unreachable Postgres falls back to the embedded database", async () => {
+  await withDbEnv({ DATABASE_URL: UNREACHABLE_POSTGRES }, async () => {
     const ping = await pingDb();
     assert.equal(ping.driver, "pglite");
-    assert.ok(ping.latencyMs >= 0);
-  } finally {
-    if (globalThis.__aetherDb) {
-      await globalThis.__aetherDb.handle.then((h) => h.close()).catch(() => undefined);
-      globalThis.__aetherDb = undefined;
-    }
-    if (prevUrl === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = prevUrl;
-    if (prevVercel === undefined) delete process.env.VERCEL;
-    else process.env.VERCEL = prevVercel;
-  }
+  });
+});
+
+test("on Vercel, an unreachable Postgres is reported as unreachable instead of serving a private embedded database", async () => {
+  await withDbEnv({ DATABASE_URL: UNREACHABLE_POSTGRES, VERCEL: "1" }, async () => {
+    const { db } = await systemStatus();
+    assert.equal(db.configured, true);
+    assert.equal(db.connected, false);
+    assert.equal(db.migrated, false);
+    assert.equal(db.driver, null);
+    assert.equal(typeof db.error, "string");
+  });
+});
+
+test("on Vercel, a missing DATABASE_URL is a configuration error, not an embedded database", async () => {
+  await withDbEnv({ VERCEL: "1" }, async () => {
+    const { db } = await systemStatus();
+    assert.equal(db.configured, false);
+    assert.equal(db.connected, false);
+    assert.equal(db.driver, null);
+    assert.match(db.error ?? "", /DATABASE_URL/);
+  });
+});
+
+test("on Vercel, an explicit pglite: URL is refused because each function would get its own copy", async () => {
+  await withDbEnv({ DATABASE_URL: "pglite:memory", VERCEL: "1" }, async () => {
+    const { db } = await systemStatus();
+    assert.equal(db.configured, false);
+    assert.equal(db.connected, false);
+    assert.equal(db.driver, null);
+  });
 });
 

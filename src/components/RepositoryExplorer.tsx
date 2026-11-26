@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import type { FileSummaryDto } from "@/lib/contracts";
 import { useVirtualRows } from "@/lib/use-virtual";
 import { basename, cn, fuzzyMatch } from "@/lib/utils";
-import { EmptyState, FileStatusMark, HighlightedText, Icon, PaneHeader, Segmented, SkeletonRows } from "./ui";
+import { Button, EmptyState, FileStatusMark, HighlightedText, Icon, PaneHeader, Segmented, SkeletonRows } from "./ui";
 
 interface DirNode {
   name: string;
@@ -72,17 +72,22 @@ function countTone(f: FileSummaryDto): string {
 export function RepositoryExplorer({
   files,
   loading,
+  error,
   selectedId,
   onSelect,
   onAnalyze,
   onDelete,
+  onRetry,
 }: {
   files: FileSummaryDto[] | undefined;
   loading: boolean;
+  /** Why the file list could not be loaded; a failed request must never look like an empty project. */
+  error: string | null;
   selectedId: number | null;
   onSelect: (id: number) => void;
   onAnalyze: (id: number) => void;
   onDelete: (file: FileSummaryDto) => void;
+  onRetry: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [quick, setQuick] = useState<Quick>("all");
@@ -174,6 +179,17 @@ export function RepositoryExplorer({
       <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto py-1">
         {loading && !files ? (
           <SkeletonRows rows={14} />
+        ) : error && !files?.length ? (
+          <EmptyState
+            title="Couldn't load files"
+            action={
+              <Button size="xs" icon="refresh" onClick={onRetry}>
+                Try again
+              </Button>
+            }
+          >
+            {error}
+          </EmptyState>
         ) : rows.length === 0 ? (
           <EmptyState title={files?.length ? "No matching files" : "No files yet"}>{files?.length ? "Try another search or filter." : "Open a folder to index a project."}</EmptyState>
         ) : (

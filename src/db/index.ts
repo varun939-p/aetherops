@@ -145,19 +145,38 @@ function stripQuotes(val: string): string {
   return trimmed;
 }
 
-function defaultPgliteUrl(): string {
-  return process.env.VERCEL ? "pglite:/tmp/aetherops-pglite" : "pglite:./.data/pglite";
+const LOCAL_PGLITE_URL = "pglite:./.data/pglite";
+const HOSTED_DB_REQUIRED =
+  "Hosted deployments need a shared Postgres database: set DATABASE_URL to a postgres:// URL in the project's environment variables, then redeploy.";
+
+/**
+ * The embedded database lives inside one process. A serverless host runs each function in its own
+ * sandbox, so every function would get a private, empty copy that the others cannot see (the file
+ * list would not find a project another route created). Hosted deployments therefore always need a
+ * shared Postgres, and the embedded database is a local-only fallback.
+ */
+function isServerlessHost(): boolean {
+  return Boolean(process.env.VERCEL);
+}
+
+function embeddedFallbackAllowed(): boolean {
+  return !isServerlessHost() && process.env.DATABASE_FALLBACK?.toLowerCase() !== "off";
 }
 
 export function getDatabaseUrl(): string {
   const raw = process.env.DATABASE_URL;
   const url = raw ? stripQuotes(raw) : "";
   if (!url) {
-    if (process.env.DATABASE_FALLBACK?.toLowerCase() !== "off") {
-      return defaultPgliteUrl();
-    }
+    if (embeddedFallbackAllowed()) return LOCAL_PGLITE_URL;
     throw new DatabaseConfigError(
-      "DATABASE_URL is not set. Use a postgres:// URL or pglite:./.data/pglite for the embedded local database."
+      isServerlessHost()
+        ? `DATABASE_URL is not set. ${HOSTED_DB_REQUIRED}`
+        : "DATABASE_URL is not set. Use a postgres:// URL or pglite:./.data/pglite for the embedded local database."
+    );
+  }
+  if (isServerlessHost() && resolveDriver(url) === "pglite") {
+    throw new DatabaseConfigError(
+      `DATABASE_URL points at the embedded pglite: database, which cannot be shared between serverless functions. ${HOSTED_DB_REQUIRED}`
     );
   }
   return url;
@@ -169,7 +188,7 @@ export function resolveDriver(url: string): DbDriver {
 
 export function resolvePgliteDir(url: string): string {
   const clean = stripQuotes(url);
-  const rawTarget = clean.slice(PGLITE_PREFIX.length) || (process.env.VERCEL ? "/tmp/aetherops-pglite" : ".data/pglite");
+  const rawTarget = clean.slice(PGLITE_PREFIX.length) || ".data/pglite";
   if (rawTarget === "memory" || rawTarget === ":memory:") return "";
   // Runtime-only location; excluded from Turbopack's file tracing.
   return path.resolve(/*turbopackIgnore: true*/ process.cwd(), rawTarget);
@@ -328,13 +347,12 @@ async function createHandle(url: string): Promise<DbHandle> {
     };
   } catch (err) {
     await pool.end().catch(() => undefined);
-    if (process.env.DATABASE_FALLBACK?.toLowerCase() !== "off") {
+    if (embeddedFallbackAllowed()) {
       const reason = err instanceof Error ? err.message : String(err);
-      const fallbackUrl = defaultPgliteUrl();
       console.warn(
-        `[db] Primary Postgres (${sanitized.host ?? "remote"}) unreachable (${reason}); falling back to embedded database (${fallbackUrl}).`
+        `[db] Primary Postgres (${sanitized.host ?? "remote"}) unreachable (${reason}); falling back to embedded database (${LOCAL_PGLITE_URL}).`
       );
-      return createPgliteHandle(resolvePgliteDir(fallbackUrl));
+      return createPgliteHandle(resolvePgliteDir(LOCAL_PGLITE_URL));
     }
     throw err;
   }
