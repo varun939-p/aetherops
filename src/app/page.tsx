@@ -92,7 +92,7 @@ export default function CommandCenter() {
   const wsId = active?.id ?? null;
   const busy = activity !== null;
 
-  const { data: files, isLoading: filesLoading, mutate: mutateFiles } = useSWR<FileSummaryDto[]>(wsId ? `/api/files?workspaceId=${wsId}` : null, swrFetcher, {
+  const { data: files, error: filesError, isLoading: filesLoading, mutate: mutateFiles } = useSWR<FileSummaryDto[]>(wsId ? `/api/files?workspaceId=${wsId}` : null, swrFetcher, {
     refreshInterval: (data) => (busy || data?.some((f) => f.status === "analyzing") ? 1500 : 10_000),
     keepPreviousData: true,
   });
@@ -340,7 +340,7 @@ export default function CommandCenter() {
   const setupMessage = !system
     ? null
     : !system.db.configured
-      ? "DATABASE_URL is not set. Add a postgres:// URL (or pglite:./.data/pglite for the embedded local database) to .env and restart."
+      ? (system.db.error ?? "DATABASE_URL is not set. Add a postgres:// URL (or pglite:./.data/pglite for the embedded local database) to .env and restart.")
       : !system.db.connected
         ? (system.db.error ?? "Database is unreachable.")
         : !system.db.migrated
@@ -348,6 +348,7 @@ export default function CommandCenter() {
           : null;
 
   const progressPct = activity?.total ? Math.min(100, (activity.done / Math.max(1, activity.total)) * 100) : null;
+  const filesListError = filesError ? describeError(filesError).text : null;
 
   return (
     <div className="grid h-dvh w-full max-w-[100vw] grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_auto_minmax(0,1fr)_32px] overflow-hidden bg-canvas">
@@ -411,7 +412,16 @@ export default function CommandCenter() {
               : "hidden"
           )}
         >
-          <RepositoryExplorer files={files} loading={filesLoading} selectedId={selectedId} onSelect={selectFile} onAnalyze={analyze} onDelete={deleteFile} />
+          <RepositoryExplorer
+            files={files}
+            loading={filesLoading}
+            error={filesListError}
+            selectedId={selectedId}
+            onSelect={selectFile}
+            onAnalyze={analyze}
+            onDelete={deleteFile}
+            onRetry={() => void mutateFiles()}
+          />
         </div>
 
         <CodeViewport
@@ -463,7 +473,7 @@ export default function CommandCenter() {
             {activity.detail && <span className="truncate font-mono text-[11.5px] text-fg-subtle">{activity.detail}</span>}
           </span>
         ) : (
-          <span className="truncate">{active ? `${formatInt(files?.length ?? 0)} files indexed` : "No project open"}</span>
+          <span className="truncate">{!active ? "No project open" : filesListError && !files?.length ? "File list unavailable" : `${formatInt(files?.length ?? 0)} files indexed`}</span>
         )}
         {stats && (
           <span className="tnum ml-auto shrink-0">

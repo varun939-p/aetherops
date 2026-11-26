@@ -58,6 +58,20 @@ Add `GEMINI_API_KEY` and `GEMINI_MODEL` to enable deep analysis and patches.
 > **Upgrading an existing database:** migration `0000_drop_legacy` drops the prototype's `files`, `issues`,
 > and `analysis_history` tables (cached file copies and derived analysis only). Re-link your folder afterwards.
 
+### Hosted deployments (Vercel)
+
+A hosted deployment needs a **shared Postgres database** (Neon, Supabase, …):
+
+1. Run `npm run db:migrate` once with `DATABASE_URL` set to that database, so the schema exists before the first request.
+2. Set the same `DATABASE_URL` in the project's environment variables (use the provider's pooled connection string).
+3. Redeploy.
+
+The embedded `pglite:` database is local-only. A serverless host runs each function in its own sandbox, so
+every function would get a private, empty copy: the sample project created by one route would be invisible
+to the route that lists files. For that reason the app never falls back to the embedded database on Vercel.
+If `DATABASE_URL` is missing, points at `pglite:`, or the database is unreachable (for example a paused
+free-tier project), the app shows a **Setup needed** banner instead of starting with empty data.
+
 ## Using it
 
 On first open, AetherOps loads a built-in **Sample project**: three small services with real defects
